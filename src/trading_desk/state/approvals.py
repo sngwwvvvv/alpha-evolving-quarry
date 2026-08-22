@@ -6,12 +6,18 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from trading_desk.config import canonical_json, sha256_hex, utc_now
-from trading_desk.state.db import Database, RunIdentity
+from trading_desk.state.db import (
+    Database,
+    RunIdentity,
+    family_ids_with_oos_rejection,
+    insert_family_row,
+)
 
 APPROVAL_MAX_AGE = timedelta(hours=24)
 START_PAPER = "start_paper"
 RESUME_MDD = "resume_mdd"
 RESUME_DATA_GAP = "resume_data_gap"
+APPROVE_NEW_FAMILY = "approve_new_family"
 APPROVAL_ACTIONS = frozenset({START_PAPER, RESUME_MDD, RESUME_DATA_GAP})
 OBJECT_HASH_KEYS = frozenset(
     {
@@ -25,6 +31,7 @@ OBJECT_HASH_KEYS = frozenset(
         "validation_policy_hash",
     }
 )
+NEW_FAMILY_HASH_KEYS = frozenset({"proposed_family_id", "rejected_family_id"})
 
 
 class ApprovalError(ValueError):
@@ -127,6 +134,28 @@ def _payload_matches(row: sqlite3.Row, command: ApprovalCommand) -> bool:
     )
 
 
+def _validate_envelope(
+    command: ApprovalCommand,
+    *,
+    allowlist: Collection[str],
+    now: datetime,
+) -> None:
+    if now.tzinfo is None or now.utcoffset() != timedelta(0):
+        raise ApprovalError("timestamp must be UTC")
+    _require_utc_timestamp(command.timestamp, now=now)
+    if command.actor_id not in allowlist:
+        raise ApprovalError("unallowlisted actor")
+    expected_hash = hash_approval_command(
+        actor_id=command.actor_id,
+        action=command.action,
+        object_hashes=command.object_hashes,
+        timestamp=command.timestamp,
+        idempotency_key=command.idempotency_key,
+    )
+    if command.source_command_hash != expected_hash:
+        raise ApprovalError("invalid source_command_hash")
+
+
 def validate_approval(
     db: Database,
     command: ApprovalCommand,
@@ -137,21 +166,8 @@ def validate_approval(
     conn: sqlite3.Connection | None = None,
 ) -> str:
     now = now or utc_now()
-    if now.tzinfo is None or now.utcoffset() != timedelta(0):
-        raise ApprovalError("timestamp must be UTC")
-    _require_utc_timestamp(command.timestamp, now=now)
-    if command.actor_id not in allowlist:
-        raise ApprovalError("unallowlisted actor")
+    _validate_envelope(command, allowlist=allowlist, now=now)
     _reject_ambiguous(command)
-    expected_hash = hash_approval_command(
-        actor_id=command.actor_id,
-        action=command.action,
-        object_hashes=command.object_hashes,
-        timestamp=command.timestamp,
-        idempotency_key=command.idempotency_key,
-    )
-    if command.source_command_hash != expected_hash:
-        raise ApprovalError("invalid source_command_hash")
     expected = _expected_hashes(run)
     for key, value in expected.items():
         if command.object_hashes.get(key) != value:
@@ -177,3 +193,56 @@ def validate_approval(
         return _commit(conn)
     with db.transaction() as txn:
         return _commit(txn)
+
+
+def approve_new_family(
+    db: Database,
+    command: ApprovalCommand,
+    *,
+    allowlist: Collection[str],
+    now: datetime | None = None,
+) -> str:
+    now = now or utc_now()
+    _validate_envelope(command, allowlist=allowlist, now=now)
+    if command.action != APPROVE_NEW_FAMILY:
+        raise ApprovalError("ambiguous approval")
+    hashes = command.object_hashes
+    if set(hashes) != NEW_FAMILY_HASH_KEYS:
+        raise ApprovalError("ambiguous approval")
+    for key, value in hashes.items():
+        if not isinstance(value, str) or not value.strip():
+            raise ApprovalError("ambiguous approval")
+    rejected_id = hashes["rejected_family_id"]
+    proposed_id = hashes["proposed_family_id"]
+    if rejected_id == proposed_id:
+        raise ApprovalError("proposed family must differ from rejected family")
+
+    created_at = now.isoformat()
+    with db.transaction() as txn:
+        rejected = family_ids_with_oos_rejection(txn)
+        if rejected_id not in rejected:
+            raise ApprovalError("rejected family is required")
+        existing = db.get_approval(command.idempotency_key, conn=txn)
+        if existing is not None:
+            if not _payload_matches(existing, command):
+                raise ApprovalError("idempotency conflict")
+            present = txn.execute(
+                "SELECT 1 FROM families WHERE family_id = ?",
+                (proposed_id,),
+            ).fetchone()
+            if present is None:
+                insert_family_row(txn, proposed_id, created_at)
+            return proposed_id
+        db.record_approval(
+            actor_id=command.actor_id,
+            action=command.action,
+            object_hashes=dict(command.object_hashes),
+            source_command_hash=command.source_command_hash,
+            idempotency_key=command.idempotency_key,
+            conn=txn,
+        )
+        try:
+            insert_family_row(txn, proposed_id, created_at)
+        except sqlite3.IntegrityError as exc:
+            raise ApprovalError("proposed family already exists") from exc
+    return proposed_id

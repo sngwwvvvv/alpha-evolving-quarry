@@ -25,7 +25,14 @@ NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 COMMIT = "c" * 40
 
 
-def _ledger(*, run_id: str = "run-1", summary: str = "development FAIL", kind: str = "development") -> LedgerBundle:
+def _ledger(
+    *,
+    run_id: str = "run-1",
+    summary: str = "development FAIL",
+    kind: str = "development",
+    mutation_hypothesis: str | None = None,
+    prior_version_comparison: dict[str, object] | None = None,
+) -> LedgerBundle:
     return LedgerBundle(
         kind=kind,
         outcome="FAIL",
@@ -44,6 +51,8 @@ def _ledger(*, run_id: str = "run-1", summary: str = "development FAIL", kind: s
         version_id="ver-1",
         trade_references=(sha256_hex("trade-1"),),
         result_bundle_hash="b" * 64,
+        mutation_hypothesis=mutation_hypothesis,
+        prior_version_comparison=prior_version_comparison,
     )
 
 
@@ -169,6 +178,20 @@ def test_wiki_failure_is_non_blocking(tmp_path: Path) -> None:
     assert run.run_id
 
 
+def test_generic_sink_exception_is_non_blocking(tmp_path: Path) -> None:
+    db, store = _harness(tmp_path)
+
+    class BoomSink:
+        def publish(self, revision: PublicationRevision) -> str:
+            raise RuntimeError("wiki exploded")
+
+    revision = publish_revision(db, store, _ledger(), sink=BoomSink(), now=NOW)
+    assert revision.revision_id
+    row = wiki_rows(db)[0]
+    assert row["status"] == "PUBLISH_PENDING"
+    assert row["published_revision_id"] is None
+
+
 def test_markdown_json_bundle_generation(tmp_path: Path) -> None:
     db, store = _harness(tmp_path)
     sink = FakeWikiSink()
@@ -186,6 +209,21 @@ def test_markdown_json_bundle_generation(tmp_path: Path) -> None:
     assert store.path_for(store.put_json(revision.to_payload())).exists()
     assert revision.namespace == "backtest"
     assert len(revision.revision_id) == 64
+    detailed = publish_revision(
+        db,
+        store,
+        _ledger(
+            run_id="run-hyp",
+            mutation_hypothesis="Widen hourly EMA lookback",
+            prior_version_comparison={"profit_factor": {"current": "1.20", "prior": "1.10", "delta": "0.10"}},
+        ),
+        sink=sink,
+        now=NOW,
+    )
+    assert "Widen hourly EMA lookback" in detailed.markdown
+    assert "## Mutation hypothesis" in detailed.markdown
+    assert "## Prior version comparison" in detailed.markdown
+    assert "profit_factor" in detailed.markdown
 
 
 def test_paper_namespace_is_separate_from_backtest(tmp_path: Path) -> None:

@@ -77,6 +77,33 @@ def _require_immutable_version(
         raise ValueError("strategy version is immutable")
 
 
+def family_ids_with_oos_rejection(conn: sqlite3.Connection) -> frozenset[str]:
+    rows = conn.execute(
+        """SELECT DISTINCT runs.family_id
+           FROM transitions
+           JOIN runs ON runs.run_id = transitions.run_id
+           WHERE transitions.to_state = 'REJECTED'"""
+    ).fetchall()
+    return frozenset(str(row["family_id"]) for row in rows)
+
+
+def insert_family_row(conn: sqlite3.Connection, family_id: str, created_at: str) -> None:
+    conn.execute(
+        "INSERT INTO families (family_id, created_at) VALUES (?, ?)",
+        (family_id, created_at),
+    )
+    conn.execute(
+        """INSERT INTO budgets (
+               family_id,
+               performance_evaluated_versions,
+               oos_evaluations,
+               max_performance_evaluated_versions,
+               max_oos_evaluations
+           ) VALUES (?, 0, 0, 8, 1)""",
+        (family_id,),
+    )
+
+
 def _row_to_run(row: sqlite3.Row) -> RunIdentity:
     return RunIdentity(
         family_id=row["family_id"],
@@ -129,20 +156,11 @@ class Database:
         family_id = _require_text("family_id", family_id or uuid.uuid4().hex)
         now = _utc_timestamp()
         with self.transaction() as conn:
-            conn.execute(
-                "INSERT INTO families (family_id, created_at) VALUES (?, ?)",
-                (family_id, now),
-            )
-            conn.execute(
-                """INSERT INTO budgets (
-                       family_id,
-                       performance_evaluated_versions,
-                       oos_evaluations,
-                       max_performance_evaluated_versions,
-                       max_oos_evaluations
-                   ) VALUES (?, 0, 0, 8, 1)""",
-                (family_id,),
-            )
+            if family_ids_with_oos_rejection(conn):
+                from trading_desk.state.approvals import ApprovalError
+
+                raise ApprovalError("approval required after OOS rejection")
+            insert_family_row(conn, family_id, now)
         return family_id
 
     def register_version(

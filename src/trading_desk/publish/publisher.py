@@ -124,6 +124,18 @@ def render_markdown(ledger: LedgerBundle, *, namespace: str, revision_id: str) -
             "",
             canonical_json(ledger.loss_attribution),
             "",
+            "## Mutation hypothesis",
+            "",
+            ledger.mutation_hypothesis or "(none)",
+            "",
+            "## Prior version comparison",
+            "",
+            (
+                canonical_json(ledger.prior_version_comparison)
+                if ledger.prior_version_comparison
+                else "(none)"
+            ),
+            "",
             "## Trade references",
             "",
             refs,
@@ -178,7 +190,7 @@ def process_publish_outbox(
         revision = PublicationRevision.from_payload(claim.payload)
         try:
             sink.publish(revision)
-        except WikiPublishError:
+        except Exception:
             continue
         mark_outbox_published(
             db,

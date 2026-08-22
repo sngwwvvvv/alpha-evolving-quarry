@@ -29,7 +29,7 @@ SPEC_18: tuple[tuple[str, str, str], ...] = (
     ("7. same-minute TP/SL", "backtest/test_causality.py", "test_same_minute_tp_and_sl_uses_stop_first"),
     ("8. gate boundaries", "validation/test_policy_v2.py", "test_hard_boundaries_and_independent_gates"),
     ("9. exact 15% MDD", "backtest/test_causality.py", "test_exact_fifteen_percent_mdd_fails"),
-    ("10. OOS sealing", "validation/test_policy_v2.py", "test_sealed_oos_once_rejection_and_research_prohibition"),
+    ("10. OOS sealing", "state/test_transitions_approvals.py", "test_approve_new_family_required_after_oos_rejection"),
     ("11. READY_FOR_PAPER approval", "state/test_transitions_approvals.py", "test_ready_for_paper_starts_only_with_exact_approval"),
     ("12. daily vs MDD resume", "paper/test_recovery.py", "test_daily_loss_resumes_automatically_next_utc_day"),
     ("13. approval rejection", "state/test_transitions_approvals.py", "test_approval_rejects_stale_superseded_ambiguous_and_conflicting_idempotency"),
@@ -77,6 +77,11 @@ def test_s18_boundaries_and_cross_asset() -> None:
 
 def test_s18_oos_sealing(tmp_path: Path) -> None:
     _call("validation/test_policy_v2.py", "test_sealed_oos_once_rejection_and_research_prohibition", tmp_path)
+    _call(
+        "state/test_transitions_approvals.py",
+        "test_approve_new_family_required_after_oos_rejection",
+        tmp_path / "new-family",
+    )
 
 
 def test_s18_approvals(tmp_path: Path) -> None:
@@ -133,7 +138,7 @@ def test_s18_end_to_end_data_backtest_validation_ledger_publish(tmp_path: Path) 
     revision = publish_revision(db, store, cycle.ledger, sink=sink, namespace="backtest")
     assert revision.namespace == "backtest"
     assert cycle.ledger.executive_summary in revision.markdown
-    assert cycle.ledger.bundle_hash in revision.json_payload.get("bundle_hash", revision.bundle_hash)
+    assert revision.bundle_hash == cycle.ledger.bundle_hash
     assert sink.get(revision.revision_id) is not None
     page = sink.get(revision.revision_id)
     assert page is not None

@@ -10,8 +10,10 @@ import pytest
 from trading_desk.config import UTC, sha256_hex
 from trading_desk.state.approvals import (
     APPROVAL_MAX_AGE,
+    APPROVE_NEW_FAMILY,
     ApprovalCommand,
     ApprovalError,
+    approve_new_family,
     hash_approval_command,
     validate_approval,
 )
@@ -239,7 +241,16 @@ def test_oos_terminal_paths(tmp_path: Path) -> None:
         apply(db, passed, "OOS_RUNNING", seq=2)
     assert states_of(db, passed) == ["DRAFT", "DEVELOPMENT_RUNNING"]
 
-    other_family, _, other = _register_run(db)
+    successor_id = approve_new_family(
+        db,
+        make_new_family_approval(
+            rejected_family_id=family_id,
+            proposed_family_id="oos-retry-family",
+        ),
+        allowlist=ALLOWLIST,
+        now=NOW,
+    )
+    other_family, _, other = _register_run(db, family_id=successor_id)
     walk(db, other, ("DRAFT", "DEVELOPMENT_RUNNING", "OOS_RUNNING", "READY_FOR_PAPER"))
     assert db.get_budget(other_family).oos_evaluations == 1
     with pytest.raises(TransitionError, match="approval required"):
@@ -578,3 +589,113 @@ def test_state_modules_have_no_llm_imports() -> None:
             for item in imported
             for needle in forbidden
         )
+
+
+def make_new_family_approval(
+    *,
+    rejected_family_id: str,
+    proposed_family_id: str,
+    actor_id: str = "user-1",
+    idempotency_key: str = "new-family-1",
+    timestamp: datetime = NOW,
+    hashes: dict[str, str] | None = None,
+) -> ApprovalCommand:
+    hashes = hashes if hashes is not None else {
+        "proposed_family_id": proposed_family_id,
+        "rejected_family_id": rejected_family_id,
+    }
+    digest = hash_approval_command(
+        actor_id=actor_id,
+        action=APPROVE_NEW_FAMILY,
+        object_hashes=hashes,
+        timestamp=timestamp,
+        idempotency_key=idempotency_key,
+    )
+    return ApprovalCommand(
+        actor_id=actor_id,
+        action=APPROVE_NEW_FAMILY,
+        object_hashes=hashes,
+        source_command_hash=digest,
+        timestamp=timestamp,
+        idempotency_key=idempotency_key,
+    )
+
+
+def test_approve_new_family_required_after_oos_rejection(tmp_path: Path) -> None:
+    db = Database(tmp_path / "state.sqlite3")
+    first = db.create_family("first-family")
+    second = db.create_family("second-before-reject")
+    assert first != second
+
+    family_id, _, rejected = _register_run(db)
+    walk(db, rejected, ("DRAFT", "DEVELOPMENT_RUNNING", "OOS_RUNNING", "REJECTED"))
+    with pytest.raises(ApprovalError, match="approval required after OOS rejection"):
+        db.create_family("blocked")
+
+    with pytest.raises(ApprovalError, match="ambiguous approval"):
+        approve_new_family(
+            db,
+            make_new_family_approval(
+                rejected_family_id=family_id,
+                proposed_family_id="next-family",
+                hashes={"family_id": family_id},
+            ),
+            allowlist=ALLOWLIST,
+            now=NOW,
+        )
+    with pytest.raises(ApprovalError, match="unallowlisted actor"):
+        approve_new_family(
+            db,
+            make_new_family_approval(
+                rejected_family_id=family_id,
+                proposed_family_id="next-family",
+                actor_id="intruder",
+            ),
+            allowlist=ALLOWLIST,
+            now=NOW,
+        )
+    with pytest.raises(ApprovalError, match="rejected family is required"):
+        approve_new_family(
+            db,
+            make_new_family_approval(
+                rejected_family_id=second,
+                proposed_family_id="next-family",
+            ),
+            allowlist=ALLOWLIST,
+            now=NOW,
+        )
+    with pytest.raises(ApprovalError, match="proposed family must differ"):
+        approve_new_family(
+            db,
+            make_new_family_approval(
+                rejected_family_id=family_id,
+                proposed_family_id=family_id,
+            ),
+            allowlist=ALLOWLIST,
+            now=NOW,
+        )
+
+    created = approve_new_family(
+        db,
+        make_new_family_approval(
+            rejected_family_id=family_id,
+            proposed_family_id="next-family",
+        ),
+        allowlist=ALLOWLIST,
+        now=NOW,
+    )
+    assert created == "next-family"
+    replayed = approve_new_family(
+        db,
+        make_new_family_approval(
+            rejected_family_id=family_id,
+            proposed_family_id="next-family",
+        ),
+        allowlist=ALLOWLIST,
+        now=NOW,
+    )
+    assert replayed == "next-family"
+    _, _, successor = _register_run(db, family_id=created)
+    walk(db, successor, ("DRAFT", "DEVELOPMENT_RUNNING", "OOS_RUNNING"))
+    assert db.get_budget(created).oos_evaluations == 1
+    assert states_of(db, successor)[-1] == "OOS_RUNNING"
