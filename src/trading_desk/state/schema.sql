@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS strategy_versions (
     code_commit TEXT NOT NULL,
     spec_json TEXT NOT NULL,
     spec_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    UNIQUE (strategy_version_id, family_id, code_commit)
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -23,7 +24,9 @@ CREATE TABLE IF NOT EXISTS runs (
     derived_data_hash TEXT NOT NULL,
     validation_policy_hash TEXT NOT NULL,
     execution_policy_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (strategy_version_id, family_id, code_commit)
+        REFERENCES strategy_versions (strategy_version_id, family_id, code_commit)
 );
 
 CREATE TABLE IF NOT EXISTS transitions (

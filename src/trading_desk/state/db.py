@@ -41,6 +41,15 @@ def _utc_timestamp() -> str:
     return utc_now().isoformat()
 
 
+def _get_version_row(conn: sqlite3.Connection, strategy_version_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        """SELECT family_id, code_commit, spec_hash
+           FROM strategy_versions
+           WHERE strategy_version_id = ?""",
+        (strategy_version_id,),
+    ).fetchone()
+
+
 def _require_text(name: str, value: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} is required")
@@ -51,6 +60,21 @@ def _require_hash(name: str, value: str) -> str:
     if not isinstance(value, str) or _HASH_RE.fullmatch(value) is None:
         raise ValueError(f"invalid {name}")
     return value
+
+
+def _require_immutable_version(
+    existing: sqlite3.Row,
+    *,
+    family_id: str,
+    code_commit: str,
+    spec_hash: str,
+) -> None:
+    if (
+        existing["spec_hash"] != spec_hash
+        or existing["family_id"] != family_id
+        or existing["code_commit"] != code_commit
+    ):
+        raise ValueError("strategy version is immutable")
 
 
 def _row_to_run(row: sqlite3.Row) -> RunIdentity:
@@ -138,26 +162,32 @@ class Database:
         )
         version_id = _require_text("strategy_version_id", version_id)
         with self.transaction() as conn:
-            existing = conn.execute(
-                """SELECT family_id, code_commit, spec_hash
-                   FROM strategy_versions
-                   WHERE strategy_version_id = ?""",
-                (version_id,),
-            ).fetchone()
+            existing = _get_version_row(conn, version_id)
             if existing is not None:
-                if (
-                    existing["spec_hash"] != spec_hash
-                    or existing["family_id"] != family_id
-                    or existing["code_commit"] != code_commit
-                ):
-                    raise ValueError("strategy version is immutable")
+                _require_immutable_version(
+                    existing,
+                    family_id=family_id,
+                    code_commit=code_commit,
+                    spec_hash=spec_hash,
+                )
                 return version_id
-            conn.execute(
-                """INSERT INTO strategy_versions (
-                       strategy_version_id, family_id, code_commit, spec_json, spec_hash, created_at
-                   ) VALUES (?, ?, ?, ?, ?, ?)""",
-                (version_id, family_id, code_commit, spec_json, spec_hash, _utc_timestamp()),
-            )
+            try:
+                conn.execute(
+                    """INSERT INTO strategy_versions (
+                           strategy_version_id, family_id, code_commit, spec_json, spec_hash, created_at
+                       ) VALUES (?, ?, ?, ?, ?, ?)""",
+                    (version_id, family_id, code_commit, spec_json, spec_hash, _utc_timestamp()),
+                )
+            except sqlite3.IntegrityError:
+                existing = _get_version_row(conn, version_id)
+                if existing is None:
+                    raise
+                _require_immutable_version(
+                    existing,
+                    family_id=family_id,
+                    code_commit=code_commit,
+                    spec_hash=spec_hash,
+                )
         return version_id
 
     def create_run(
@@ -182,6 +212,17 @@ class Database:
             run_id=uuid.uuid4().hex,
         )
         with self.transaction() as conn:
+            version = conn.execute(
+                "SELECT family_id, code_commit FROM strategy_versions WHERE strategy_version_id = ?",
+                (identity.strategy_version_id,),
+            ).fetchone()
+            if version is None:
+                raise ValueError("unknown strategy_version_id")
+            if (
+                version["family_id"] != identity.family_id
+                or version["code_commit"] != identity.code_commit
+            ):
+                raise ValueError("family_id does not match strategy version")
             conn.execute(
                 """INSERT INTO runs (
                        run_id, family_id, strategy_version_id, code_commit,
@@ -261,14 +302,26 @@ class Database:
         self,
         *,
         run_id: str,
-        family_id: str,
+        family_id: str | None = None,
         from_state: str | None,
         to_state: str,
         idempotency_key: str,
         budget_kind: BudgetKind,
         reason: str | None = None,
     ) -> None:
+        run_id = _require_text("run_id", run_id)
+        if family_id is not None:
+            family_id = _require_text("family_id", family_id)
         with self.transaction() as conn:
+            run = conn.execute(
+                "SELECT family_id FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                raise ValueError("unknown run_id")
+            run_family_id = run["family_id"]
+            if family_id is not None and family_id != run_family_id:
+                raise ValueError("family_id does not match run")
             self.append_transition(
                 conn,
                 run_id=run_id,
@@ -277,7 +330,7 @@ class Database:
                 idempotency_key=idempotency_key,
                 reason=reason,
             )
-            self.consume_budget(conn, family_id=family_id, kind=budget_kind)
+            self.consume_budget(conn, family_id=run_family_id, kind=budget_kind)
 
     def list_transitions(self, run_id: str) -> list[sqlite3.Row]:
         run_id = _require_text("run_id", run_id)

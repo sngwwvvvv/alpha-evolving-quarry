@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from trading_desk.config import canonical_json, sha256_hex
+from trading_desk.state import db as state_db
 from trading_desk.state.db import Database, RunIdentity
 from trading_desk.storage.artifacts import ArtifactStore
 
@@ -244,3 +245,100 @@ def test_state_transition_and_budget_commit_and_rollback_together(tmp_path: Path
     assert budget.performance_evaluated_versions == 1
     assert budget.oos_evaluations == 0
     assert [row["to_state"] for row in db.list_transitions(run.run_id)] == ["DEVELOPMENT_RUNNING"]
+
+
+def test_mismatched_family_id_fails_closed_and_rolls_back(tmp_path: Path) -> None:
+    db = Database(tmp_path / "state.sqlite3")
+    family_id, version_id, run = _register_run(db)
+    other_family = db.create_family()
+
+    with pytest.raises(ValueError, match="family_id does not match strategy version"):
+        db.create_run(
+            family_id=other_family,
+            strategy_version_id=version_id,
+            code_commit=COMMIT,
+            **_run_hashes(),
+        )
+
+    hashes = _run_hashes()
+    conn = db.connect()
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """INSERT INTO runs (
+                       run_id, family_id, strategy_version_id, code_commit,
+                       data_snapshot_hash, derived_data_hash,
+                       validation_policy_hash, execution_policy_hash, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "orphan-run",
+                    other_family,
+                    version_id,
+                    COMMIT,
+                    hashes["data_snapshot_hash"],
+                    hashes["derived_data_hash"],
+                    hashes["validation_policy_hash"],
+                    hashes["execution_policy_hash"],
+                    "2026-08-23T00:00:00+00:00",
+                ),
+            )
+    finally:
+        conn.close()
+
+    with pytest.raises(ValueError, match="family_id does not match run"):
+        db.commit_transition_and_budget(
+            run_id=run.run_id,
+            family_id=other_family,
+            from_state="DRAFT",
+            to_state="DEVELOPMENT_RUNNING",
+            idempotency_key="mismatch-family",
+            budget_kind="performance",
+        )
+
+    assert db.get_budget(family_id).performance_evaluated_versions == 0
+    assert db.get_budget(other_family).performance_evaluated_versions == 0
+    assert db.list_transitions(run.run_id) == []
+    with pytest.raises(ValueError, match="unknown run_id"):
+        db.get_run("orphan-run")
+
+
+def test_register_version_integrity_error_uses_immutability_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = Database(tmp_path / "state.sqlite3")
+    family_id = db.create_family()
+    spec = {"lookback": 20, "threshold": 1.5}
+    version_id = db.register_version(
+        family_id,
+        code_commit=COMMIT,
+        spec=spec,
+        strategy_version_id="version-race-1",
+    )
+    real_get = state_db._get_version_row
+    miss_next = True
+
+    def racing_get(conn: sqlite3.Connection, strategy_version_id: str) -> sqlite3.Row | None:
+        nonlocal miss_next
+        if miss_next:
+            miss_next = False
+            return None
+        return real_get(conn, strategy_version_id)
+
+    monkeypatch.setattr(state_db, "_get_version_row", racing_get)
+    assert (
+        db.register_version(
+            family_id,
+            code_commit=COMMIT,
+            spec=spec,
+            strategy_version_id=version_id,
+        )
+        == version_id
+    )
+    miss_next = True
+    with pytest.raises(ValueError, match="immutable"):
+        db.register_version(
+            family_id,
+            code_commit=COMMIT,
+            spec={"lookback": 21, "threshold": 1.5},
+            strategy_version_id=version_id,
+        )
