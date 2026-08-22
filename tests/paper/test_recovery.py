@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from trading_desk.backtest.account import fill_price
+from trading_desk.backtest.account import PendingEntry, fill_price
 from trading_desk.backtest.execution import PaperLifecycle
 from trading_desk.config import UTC, sha256_hex
 from trading_desk.data.contracts import MINUTE, ContractMetadata, Kline1m
@@ -31,7 +31,16 @@ from trading_desk.paper.reconcile import (
 from trading_desk.state.approvals import ApprovalCommand, ApprovalError, hash_approval_command
 from trading_desk.state.db import Database, RunIdentity
 from trading_desk.state.transitions import TransitionError, transition
-from trading_desk.strategy.models import LONG, SHORT, ExecutionPolicy, StrategyParameters, StrategySignal
+from trading_desk.strategy.models import (
+    GROSS_LEVERAGE_CEILING,
+    LONG,
+    PER_POSITION_RISK,
+    SHORT,
+    SYSTEM_LEVERAGE,
+    ExecutionPolicy,
+    StrategyParameters,
+    StrategySignal,
+)
 
 COMMIT = "c" * 40
 ALLOWLIST = frozenset({"user-1"})
@@ -234,6 +243,7 @@ class Harness:
         rest: FakeRestClient | None = None,
         latency: timedelta = timedelta(0),
         now: datetime = NOW,
+        extra_symbols: tuple[str, ...] = (),
     ) -> None:
         self.db = Database(tmp_path / "state.sqlite3")
         self.family_id, self.version_id, self.run = _register_run(self.db)
@@ -241,10 +251,14 @@ class Harness:
         self.clock = FakeClock(now)
         self.metadata = metadata or _meta()
         self.rest = rest if rest is not None else FakeRestClient()
+        self.symbols = (self.metadata.symbol,) + extra_symbols
+        metas = {self.metadata.symbol: self.metadata}
+        for symbol in extra_symbols:
+            metas[symbol] = _meta(symbol)
         self.feed = PaperFeed(
             clock=self.clock,
             rest=self.rest,
-            symbols=(self.metadata.symbol,),
+            symbols=self.symbols,
         )
         self.fills = FillAdapter(POLICY, latency=latency)
         self.engine = PaperEngine(
@@ -254,7 +268,7 @@ class Harness:
             fills=self.fills,
             clock=self.clock,
             allowlist=ALLOWLIST,
-            metadata={self.metadata.symbol: self.metadata},
+            metadata=metas,
             starting_equity=STARTING_EQUITY,
         )
         self.engine.begin_session()
@@ -262,7 +276,8 @@ class Harness:
     def arm(self, *, price: Decimal = Decimal("100")) -> None:
         now = self.clock.now()
         self.feed.ingest_account(now)
-        self.feed.ingest_price(self.metadata.symbol, now, price)
+        for symbol in self.symbols:
+            self.feed.ingest_price(symbol, now, price)
 
     def enter(
         self,
@@ -285,7 +300,10 @@ def test_required_streams_must_be_fresh_for_legal_entries(tmp_path: Path) -> Non
 
     h.arm()
     assert h.feed.required_fresh() is True
-    h.enter()
+    later = NOW + MINUTE
+    h.clock.set(later)
+    h.arm()
+    h.enter(stamp=later)
     position = h.engine.lifecycle.account.positions[h.metadata.symbol]
     assert position.quantity > 0
     assert position.quantity % h.metadata.quantity_step == 0
@@ -382,6 +400,10 @@ def test_conservative_fill_on_engine_uses_worse_observable_book(tmp_path: Path) 
     fill = next(row for row in h.engine.lifecycle.fills if row.reason == "entry")
     assert fill.price >= Decimal("101.20")
     assert fill.price >= model
+    equity = STARTING_EQUITY
+    assert fill.planned_risk <= equity * PER_POSITION_RISK
+    assert fill.notional <= equity * GROSS_LEVERAGE_CEILING
+    assert fill.notional / fill.margin == SYSTEM_LEVERAGE
 
 
 def test_analysis_only_streams_do_not_change_signal_or_risk(tmp_path: Path) -> None:
@@ -645,3 +667,196 @@ def test_paper_modules_use_fake_clock_and_no_live_binance_network() -> None:
     clock = FakeClock(NOW)
     clock.advance(timedelta(seconds=5))
     assert clock.now() == NOW + timedelta(seconds=5)
+
+
+def _spy_minutes(engine: PaperEngine) -> list[tuple[str, datetime]]:
+    applied: list[tuple[str, datetime]] = []
+    real = engine.lifecycle.on_minute
+
+    def wrapped(bar: Kline1m, metadata: ContractMetadata, funding: object) -> None:
+        applied.append((bar.symbol, bar.open_time))
+        real(bar, metadata, funding)
+
+    engine.lifecycle.on_minute = wrapped  # type: ignore[method-assign]
+    return applied
+
+
+def test_process_bar_skips_duplicate_or_older_kline(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.arm()
+    applied = _spy_minutes(h.engine)
+    h.enter()
+    last = h.engine._last_open[h.metadata.symbol]
+    assert applied == [(h.metadata.symbol, last)]
+    h.engine.process_bar(_bar(h.metadata.symbol, last, "101"))
+    h.engine.process_bar(_bar(h.metadata.symbol, last - MINUTE, "99"))
+    assert h.engine._last_open[h.metadata.symbol] == last
+    assert applied == [(h.metadata.symbol, last)]
+    assert any("duplicate" in row.reason for row in h.engine.lifecycle.rejected)
+    nxt = last + MINUTE
+    h.clock.set(nxt)
+    h.arm()
+    h.engine.process_bar(_bar(h.metadata.symbol, nxt, "100"))
+    assert h.engine._last_open[h.metadata.symbol] == nxt
+    assert applied[-1] == (h.metadata.symbol, nxt)
+
+
+def test_repair_does_not_replay_watermarked_minutes_for_other_symbols(tmp_path: Path) -> None:
+    gap = [NOW + MINUTE * offset for offset in (1, 2, 3, 4)]
+    rest_bars = [_bar("BTCUSDT", stamp, "100") for stamp in gap] + [_bar("ETHUSDT", stamp, "100") for stamp in gap]
+    h = Harness(tmp_path, rest=FakeRestClient(rest_bars), extra_symbols=("ETHUSDT",))
+    h.arm()
+    applied = _spy_minutes(h.engine)
+    h.engine.process_bar(_bar("BTCUSDT", NOW, "100"))
+    h.engine.process_bar(_bar("ETHUSDT", NOW, "100"))
+    for offset in (1, 2, 3):
+        stamp = NOW + MINUTE * offset
+        h.clock.set(stamp)
+        h.arm()
+        h.engine.process_bar(_bar("ETHUSDT", stamp, "100"))
+    assert h.engine._last_open["ETHUSDT"] == NOW + MINUTE * 3
+    assert h.engine._last_open["BTCUSDT"] == NOW
+    eth_before = [stamp for symbol, stamp in applied if symbol == "ETHUSDT"]
+    live = NOW + MINUTE * 5
+    h.clock.set(live)
+    h.arm()
+    result = h.engine.process_bar(_bar("BTCUSDT", live, "100"))
+    assert result is not None and result.repaired is True
+    eth_after = [stamp for symbol, stamp in applied if symbol == "ETHUSDT"]
+    assert eth_after[: len(eth_before)] == eth_before
+    assert eth_after.count(NOW + MINUTE) == 1
+    assert eth_after.count(NOW + MINUTE * 2) == 1
+    assert eth_after.count(NOW + MINUTE * 3) == 1
+    assert NOW + MINUTE * 4 in eth_after
+    assert h.engine._last_open["ETHUSDT"] == NOW + MINUTE * 4
+    assert h.engine._last_open["BTCUSDT"] == live
+
+
+def test_data_gap_resume_preserves_cursor_with_open_position(tmp_path: Path) -> None:
+    rest = FakeRestClient(incomplete=True)
+    h = Harness(tmp_path, rest=rest)
+    h.arm()
+    h.enter()
+    assert h.metadata.symbol in h.engine.lifecycle.account.positions
+    live = NOW + MINUTE * 5
+    h.clock.set(live)
+    h.arm()
+    result = h.engine.process_bar(_bar("BTCUSDT", live, "100"))
+    assert result is not None and result.status == "PAPER_DATA_GAP"
+    assert h.metadata.symbol in h.engine.lifecycle.account.positions
+    rest.incomplete = False
+    rest.bars = [_bar("BTCUSDT", NOW + MINUTE * offset, "100") for offset in (1, 2, 3, 4)]
+    repaired = h.engine.repair_gaps(start=NOW + MINUTE, end=live)
+    assert repaired.repaired is True
+    watermark = h.engine._last_open[h.metadata.symbol]
+    assert watermark == NOW + MINUTE * 4
+    approval = make_approval(h.run, action="resume_data_gap", idempotency_key="resume-open")
+    assert h.engine.resume_after_data_gap(approval) == "PAPER_RUNNING"
+    assert h.engine._last_open[h.metadata.symbol] == watermark
+    assert h.metadata.symbol in h.engine.lifecycle.account.positions
+    applied = _spy_minutes(h.engine)
+    h.clock.set(live)
+    h.arm()
+    h.engine.process_bar(_bar("BTCUSDT", live, "100"))
+    assert h.engine._last_open[h.metadata.symbol] == live
+    assert applied == [("BTCUSDT", live)]
+    h.engine.process_bar(_bar("BTCUSDT", live, "100"))
+    assert applied == [("BTCUSDT", live)]
+
+
+def test_reconcile_fails_closed_on_intents_and_account(tmp_path: Path) -> None:
+    start = NOW
+    end = NOW + MINUTE * 3
+    tape = tuple(
+        MarketEvent(time=NOW + MINUTE * offset, symbol="BTCUSDT", kind="kline", bar=_bar("BTCUSDT", NOW + MINUTE * offset, "100"))
+        for offset in range(3)
+    )
+    missing_intent = reconcile_chronologically(
+        intents=(LocalIntent(time=NOW + MINUTE * 9, symbol="BTCUSDT", kind="entry", quantity=Decimal("0.1")),),
+        events=tape,
+        account=PaperLifecycle().account,
+        start=start,
+        end=end,
+        symbols=("BTCUSDT",),
+    )
+    assert missing_intent.status == "PAPER_DATA_GAP"
+    assert missing_intent.repaired is False
+    assert any("intent" in reason for reason in missing_intent.reasons)
+
+    orphan = PaperLifecycle()
+    orphan.account.pending["BTCUSDT"] = PendingEntry(_signal("BTCUSDT", NOW + MINUTE), fill_time=NOW + MINUTE)
+    pending_mismatch = reconcile_chronologically(
+        intents=(),
+        events=tape,
+        account=orphan.account,
+        start=start,
+        end=end,
+        symbols=("BTCUSDT",),
+    )
+    assert pending_mismatch.status == "PAPER_DATA_GAP"
+    assert any("pending" in reason for reason in pending_mismatch.reasons)
+
+    held = PaperLifecycle()
+    h = Harness(tmp_path)
+    h.arm()
+    h.enter()
+    held.account = h.engine.lifecycle.account
+    eth_only = tuple(
+        MarketEvent(time=NOW + MINUTE * offset, symbol="ETHUSDT", kind="kline", bar=_bar("ETHUSDT", NOW + MINUTE * offset, "100"))
+        for offset in range(3)
+    )
+    missing_position = reconcile_chronologically(
+        intents=(),
+        events=eth_only,
+        account=held.account,
+        start=start,
+        end=end,
+        symbols=("BTCUSDT",),
+    )
+    assert missing_position.status == "PAPER_DATA_GAP"
+    assert any("position" in reason for reason in missing_position.reasons)
+
+
+def test_reconcile_rejects_reversed_and_duplicate_input_without_sorting() -> None:
+    reversed_events = (
+        MarketEvent(time=NOW + MINUTE * 2, symbol="BTCUSDT", kind="kline", bar=_bar("BTCUSDT", NOW + MINUTE * 2, "102")),
+        MarketEvent(time=NOW + MINUTE, symbol="BTCUSDT", kind="kline", bar=_bar("BTCUSDT", NOW + MINUTE, "101")),
+        MarketEvent(time=NOW, symbol="BTCUSDT", kind="kline", bar=_bar("BTCUSDT", NOW, "100")),
+    )
+    reversed_result = reconcile_chronologically(
+        intents=(),
+        events=reversed_events,
+        account=PaperLifecycle().account,
+        start=NOW,
+        end=NOW + MINUTE * 3,
+        symbols=("BTCUSDT",),
+    )
+    assert reversed_result.status == "PAPER_DATA_GAP"
+    assert reversed_result.repaired is False
+    assert any("reversed" in reason for reason in reversed_result.reasons)
+
+    duplicates = (
+        MarketEvent(time=NOW, symbol="BTCUSDT", kind="kline", bar=_bar("BTCUSDT", NOW, "100")),
+        MarketEvent(time=NOW + MINUTE, symbol="BTCUSDT", kind="kline", bar=_bar("BTCUSDT", NOW + MINUTE, "101")),
+        MarketEvent(time=NOW + MINUTE * 2, symbol="BTCUSDT", kind="kline", bar=_bar("BTCUSDT", NOW + MINUTE * 2, "102")),
+        MarketEvent(time=NOW + MINUTE, symbol="BTCUSDT", kind="kline", bar=_bar("BTCUSDT", NOW + MINUTE, "101")),
+    )
+    duplicate_result = reconcile_chronologically(
+        intents=(),
+        events=duplicates,
+        account=PaperLifecycle().account,
+        start=NOW,
+        end=NOW + MINUTE * 3,
+        symbols=("BTCUSDT",),
+    )
+    assert duplicate_result.status == "PAPER_DATA_GAP"
+    assert any("duplicate" in reason for reason in duplicate_result.reasons)
+
+
+def test_extreme_conservative_fill_is_rejected_when_caps_cannot_hold(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.arm()
+    h.feed.ingest_book(_book(h.metadata.symbol, NOW, ask="1000000"))
+    h.enter()
+    assert h.metadata.symbol not in h.engine.lifecycle.account.positions
+    assert h.engine.lifecycle.rejected

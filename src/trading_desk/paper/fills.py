@@ -8,7 +8,14 @@ from typing import Any
 
 from trading_desk.backtest.account import SizedOrder, fill_price, round_to_step, size_order
 from trading_desk.data.contracts import ContractMetadata
-from trading_desk.strategy.models import ExecutionPolicy
+from trading_desk.strategy.models import (
+    AGGREGATE_PLANNED_RISK,
+    GROSS_LEVERAGE_CEILING,
+    LONG,
+    PER_POSITION_RISK,
+    SYSTEM_LEVERAGE,
+    ExecutionPolicy,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +81,52 @@ class FillAdapter:
         else:
             raw = min(model, min(observed))
         return round_to_step(raw, metadata.price_tick, round_up=buy)
+
+    def fit_executable(
+        self,
+        sized: SizedOrder,
+        *,
+        entry: Decimal,
+        equity: Decimal,
+        direction: str,
+        metadata: ContractMetadata,
+        open_planned_risk: Decimal,
+        open_notional: Decimal,
+    ) -> SizedOrder | None:
+        buy = direction == LONG
+        stop_fill = fill_price(sized.stop, self.policy, metadata, buy=not buy)
+        quantity = sized.quantity
+        remaining_aggregate = AGGREGATE_PLANNED_RISK * equity - open_planned_risk
+        remaining_notional = GROSS_LEVERAGE_CEILING * equity - open_notional
+        per_position = PER_POSITION_RISK * equity
+        while quantity >= metadata.min_quantity:
+            if direction == LONG:
+                price_loss = entry - stop_fill
+            else:
+                price_loss = stop_fill - entry
+            if price_loss <= 0:
+                return None
+            loss_per_qty = price_loss + entry * self.policy.fee_rate + stop_fill * self.policy.fee_rate
+            planned = quantity * loss_per_qty
+            notional = quantity * entry
+            if (
+                planned <= per_position
+                and planned <= remaining_aggregate
+                and notional <= remaining_notional
+                and notional >= metadata.min_notional
+            ):
+                return SizedOrder(
+                    quantity=quantity,
+                    entry_price=entry,
+                    stop=sized.stop,
+                    take_profit=sized.take_profit,
+                    planned_risk=planned,
+                    notional=notional,
+                    margin=notional / SYSTEM_LEVERAGE,
+                )
+            quantity -= metadata.quantity_step
+            quantity = round_to_step(quantity, metadata.quantity_step)
+        return None
 
 
 def _book_executable(book: OrderBook, *, buy: bool, quantity: Decimal) -> Decimal | None:

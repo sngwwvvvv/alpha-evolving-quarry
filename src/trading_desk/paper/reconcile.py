@@ -15,7 +15,7 @@ from trading_desk.state.approvals import ApprovalCommand
 from trading_desk.state.db import Database, RunIdentity
 from trading_desk.state.transitions import transition
 from trading_desk.strategy.default import DefaultStrategy
-from trading_desk.strategy.models import LONG, SYSTEM_LEVERAGE, ExecutionPolicy, StrategySignal
+from trading_desk.strategy.models import LONG, ExecutionPolicy, StrategySignal
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +47,33 @@ def _is_utc(value: datetime) -> bool:
     return value.tzinfo is not None and value.utcoffset() == timedelta(0)
 
 
+def _unique(reasons: list[str]) -> tuple[str, ...]:
+    unique: list[str] = []
+    for reason in reasons:
+        if reason not in unique:
+            unique.append(reason)
+    return tuple(unique)
+
+
+def _cover_minutes(
+    *,
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    have: set[datetime],
+    reasons: list[str],
+) -> None:
+    if end < start:
+        reasons.append("reversed timestamps")
+        return
+    stamp = start
+    while stamp < end:
+        if stamp not in have:
+            reasons.append(f"unreconciled gap: {symbol}")
+            return
+        stamp += MINUTE
+
+
 def reconcile_chronologically(
     *,
     intents: Sequence[LocalIntent],
@@ -55,51 +82,76 @@ def reconcile_chronologically(
     start: datetime | None = None,
     end: datetime | None = None,
     symbols: Sequence[str] = SUPPORTED_SYMBOLS,
+    windows: Mapping[str, tuple[datetime, datetime]] | None = None,
 ) -> ReconcileResult:
-    _ = (intents, account)
     reasons: list[str] = []
     klines = [event for event in events if event.bar is not None or event.kind == "kline"]
-    timeline = sorted(klines, key=lambda item: (item.time, item.symbol, item.kind))
     seen: set[tuple[str, datetime]] = set()
-    previous: datetime | None = None
+    last_time: dict[str, datetime] = {}
     by_symbol: dict[str, list[MarketEvent]] = {}
-    for event in timeline:
+    for event in klines:
         if not _is_utc(event.time):
             reasons.append(f"non-utc event: {event.symbol}")
         key = (event.symbol, event.time)
         if key in seen:
             reasons.append(f"duplicate event: {event.symbol}")
         seen.add(key)
+        previous = last_time.get(event.symbol)
         if previous is not None and event.time < previous:
             reasons.append("reversed timestamps")
-        previous = event.time
+        last_time[event.symbol] = event.time
         by_symbol.setdefault(event.symbol, []).append(event)
 
-    if start is not None and end is not None:
-        if end < start:
-            reasons.append("reversed timestamps")
-        stamp_cursor = start
-        while start <= stamp_cursor < end:
-            for symbol in symbols:
-                have = {item.time for item in by_symbol.get(symbol, [])}
-                if stamp_cursor not in have:
-                    reasons.append(f"unreconciled gap: {symbol}")
-            if any(reason.startswith("unreconciled gap") for reason in reasons):
-                break
-            stamp_cursor += MINUTE
+    tape = {(event.symbol, event.time) for event in klines}
+    for intent in intents:
+        if (intent.symbol, intent.time) not in tape:
+            reasons.append(f"unreconciled intent: {intent.symbol}")
 
+    intent_entries = {(intent.symbol, intent.kind) for intent in intents}
+    for symbol, pending in account.pending.items():
+        fill_time = pending.fill_time
+        in_window = True
+        if windows is not None and symbol in windows:
+            win_start, win_end = windows[symbol]
+            in_window = win_start <= fill_time < win_end
+        elif start is not None and end is not None:
+            in_window = start <= fill_time < end
+        if not in_window:
+            continue
+        if (symbol, "entry") not in intent_entries:
+            reasons.append(f"unreconciled pending: {symbol}")
+        elif (symbol, fill_time) not in tape:
+            reasons.append(f"unreconciled pending: {symbol}")
+
+    cover_windows: dict[str, tuple[datetime, datetime]]
+    if windows is not None:
+        cover_windows = dict(windows)
+    elif start is not None and end is not None:
+        cover_windows = {symbol: (start, end) for symbol in symbols}
+    else:
+        cover_windows = {}
+
+    for symbol, (win_start, win_end) in cover_windows.items():
+        have = {item.time for item in by_symbol.get(symbol, [])}
+        _cover_minutes(symbol=symbol, start=win_start, end=win_end, have=have, reasons=reasons)
+
+    for symbol in account.positions:
+        if symbol not in symbols:
+            continue
+        if symbol in cover_windows:
+            win_start, win_end = cover_windows[symbol]
+            if win_start < win_end and symbol not in by_symbol:
+                reasons.append(f"unreconciled position: {symbol}")
+
+    timeline = tuple(sorted(klines, key=lambda item: (item.time, item.symbol, item.kind)))
     if reasons:
-        unique: list[str] = []
-        for reason in reasons:
-            if reason not in unique:
-                unique.append(reason)
         return ReconcileResult(
             status="PAPER_DATA_GAP",
-            reasons=tuple(unique),
-            events=tuple(timeline),
+            reasons=_unique(reasons),
+            events=timeline,
             repaired=False,
         )
-    return ReconcileResult(status="OK", events=tuple(timeline), repaired=True)
+    return ReconcileResult(status="OK", events=timeline, repaired=True)
 
 
 class WiredPaperLifecycle(PaperLifecycle):
@@ -143,34 +195,44 @@ class WiredPaperLifecycle(PaperLifecycle):
             trades=self._engine.feed.trade_prints(bar.symbol),
             asof=bar.open_time,
         )
-        fee = entry * sized.quantity * self.policy.fee_rate
-        notional = sized.quantity * entry
-        margin = notional / SYSTEM_LEVERAGE
+        fitted = self._engine.fills.fit_executable(
+            sized,
+            entry=entry,
+            equity=self._sizing_equity,
+            direction=pending.signal.direction,
+            metadata=metadata,
+            open_planned_risk=self.account.open_planned_risk(),
+            open_notional=self.account.open_notional(),
+        )
+        if fitted is None:
+            self.rejected.append(RejectedOrder(symbol=bar.symbol, time=bar.open_time, reason="risk_cap"))
+            return
+        fee = fitted.entry_price * fitted.quantity * self.policy.fee_rate
         self.account.balance -= fee
         self.account.positions[bar.symbol] = LivePosition(
             symbol=bar.symbol,
             direction=pending.signal.direction,
-            quantity=sized.quantity,
-            entry_price=entry,
+            quantity=fitted.quantity,
+            entry_price=fitted.entry_price,
             entry_time=bar.open_time,
-            stop=sized.stop,
-            take_profit=sized.take_profit,
-            planned_risk=sized.planned_risk,
-            notional=notional,
-            margin=margin,
+            stop=fitted.stop,
+            take_profit=fitted.take_profit,
+            planned_risk=fitted.planned_risk,
+            notional=fitted.notional,
+            margin=fitted.margin,
             entry_fee=fee,
         )
         self.fills.append(
             Fill(
                 symbol=bar.symbol,
-                quantity=sized.quantity,
-                price=entry,
+                quantity=fitted.quantity,
+                price=fitted.entry_price,
                 time=bar.open_time,
                 fee=fee,
                 reason="entry",
-                planned_risk=sized.planned_risk,
-                notional=notional,
-                margin=margin,
+                planned_risk=fitted.planned_risk,
+                notional=fitted.notional,
+                margin=fitted.margin,
             )
         )
 
@@ -263,6 +325,12 @@ class PaperEngine:
 
     def process_bar(self, bar: Kline1m) -> ReconcileResult | None:
         self.check_freshness()
+        last = self._last_open.get(bar.symbol)
+        if last is not None and bar.open_time <= last:
+            self.lifecycle.rejected.append(
+                RejectedOrder(symbol=bar.symbol, time=bar.open_time, reason="duplicate kline")
+            )
+            return None
         result = self._repair_if_gap(bar)
         if result is not None and result.status == "PAPER_DATA_GAP":
             return result
@@ -288,20 +356,35 @@ class PaperEngine:
 
     def repair_gaps(self, *, start: datetime, end: datetime) -> ReconcileResult:
         events: list[MarketEvent] = []
+        windows: dict[str, tuple[datetime, datetime]] = {}
+        hole_symbols: list[str] = []
         for symbol in self.feed.symbols:
-            for bar in self.feed.fetch_rest_klines(symbol, start, end):
+            last = self._last_open.get(symbol)
+            symbol_start = last + MINUTE if last is not None else start
+            if last is not None:
+                symbol_start = max(symbol_start, start)
+            if symbol_start >= end:
+                continue
+            hole_symbols.append(symbol)
+            windows[symbol] = (symbol_start, end)
+            for bar in self.feed.fetch_rest_klines(symbol, symbol_start, end):
+                if last is not None and bar.open_time <= last:
+                    continue
                 events.append(MarketEvent(time=bar.open_time, symbol=bar.symbol, kind="kline", bar=bar))
         intents = tuple(
             LocalIntent(time=pending.fill_time, symbol=symbol, kind="entry")
             for symbol, pending in self.lifecycle.account.pending.items()
+            if start <= pending.fill_time < end
         )
+        cover_symbols = tuple(hole_symbols) or tuple(self.feed.symbols)
         result = reconcile_chronologically(
             intents=intents,
             events=events,
             account=self.lifecycle.account,
-            start=start,
-            end=end,
-            symbols=self.feed.symbols,
+            start=start if not windows else None,
+            end=end if not windows else None,
+            symbols=cover_symbols,
+            windows=windows or None,
         )
         if result.status != "OK" or result.repaired is not True:
             self._gap_repaired = False
@@ -309,6 +392,9 @@ class PaperEngine:
             return result
         for event in result.events:
             if event.bar is None:
+                continue
+            last = self._last_open.get(event.bar.symbol)
+            if last is not None and event.bar.open_time <= last:
                 continue
             meta = self._metadata.get(event.bar.symbol)
             if meta is None:
@@ -370,5 +456,4 @@ class PaperEngine:
         )
         self._unrepaired_gap = False
         self.engine_status = "PAPER_RUNNING"
-        self._last_open.clear()
         return state
