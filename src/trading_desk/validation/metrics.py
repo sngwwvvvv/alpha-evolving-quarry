@@ -30,6 +30,8 @@ class TradeRecord:
     funding: Decimal = ZERO
     slippage_cost: Decimal = ZERO
     gross_pnl: Decimal | None = None
+    exit_reason: str = ""
+    regime: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "net_pnl", as_decimal(self.net_pnl))
