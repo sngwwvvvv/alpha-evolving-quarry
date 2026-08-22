@@ -11,6 +11,14 @@ from typing import Sequence
 from trading_desk.validation.metrics import TradeRecord, as_decimal, profit_factor
 
 EULER_GAMMA = 0.5772156649015329
+WEEKS_PER_YEAR = 52
+
+
+def annualized_psr_benchmark(benchmark_sharpe: float, return_frequency: str) -> float:
+    # Policy benchmark_sharpe is annualized; weekly_utc PSR uses SR* = annualized / sqrt(52).
+    if return_frequency != "weekly_utc":
+        raise ValueError("unknown PSR return frequency")
+    return float(benchmark_sharpe) / math.sqrt(WEEKS_PER_YEAR)
 
 
 def _norm_cdf(value: float) -> float:

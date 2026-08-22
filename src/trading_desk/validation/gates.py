@@ -234,9 +234,15 @@ def evaluate_gates(
             metrics.get("concentration_period_max", 1),
             development["concentration"]["period"]["gate_share_maximum"],
         ),
-        "neighborhood": _ge(
-            metrics.get("neighborhood_survival_fraction", 0),
-            development["neighborhood"]["gate_survival_fraction_minimum"],
+        "neighborhood": (
+            GateResult.FAIL
+            if "neighborhood_case_count" in metrics
+            and "neighborhood_required_cases" in metrics
+            and int(metrics["neighborhood_case_count"]) != int(metrics["neighborhood_required_cases"])
+            else _ge(
+                metrics.get("neighborhood_survival_fraction", 0),
+                development["neighborhood"]["gate_survival_fraction_minimum"],
+            )
         ),
         "leave_one_symbol_out": loo_gate,
         "mutations_per_successor": mutation_gate,

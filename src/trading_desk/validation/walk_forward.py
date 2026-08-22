@@ -34,6 +34,10 @@ def walk_forward_windows(
     return tuple(windows)
 
 
+def in_half_open(stamp: datetime, start: datetime, end: datetime) -> bool:
+    return start <= stamp < end
+
+
 def month_span(start: datetime, end: datetime) -> int | None:
     if end < start:
         return None

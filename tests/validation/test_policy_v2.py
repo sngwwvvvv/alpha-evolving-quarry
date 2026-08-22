@@ -27,10 +27,11 @@ from trading_desk.validation import (
     research_inputs,
 )
 from trading_desk.validation.gates import evaluate_gates
-from trading_desk.validation.metrics import perturbed_parameters
-from trading_desk.validation.walk_forward import walk_forward_windows
+from trading_desk.validation.metrics import compute_metrics, perturbed_parameters, window_equities
+from trading_desk.validation.statistics import annualized_psr_benchmark, probabilistic_sharpe_ratio
+from trading_desk.validation.walk_forward import in_half_open, walk_forward_windows
 
-GOLDEN_BUNDLE_HASH = "cd59c9e49f7f1f420cf007625a25a8107096310ccf494860f72258f95d2aff07"
+GOLDEN_BUNDLE_HASH = "2eb0b1dc22205c5722e78fb7dbdeecd04cddea09cbe4c6d6d7a6c7e03f4564e8"
 START = datetime(2020, 1, 1, tzinfo=UTC)
 END = datetime(2021, 1, 1, tzinfo=UTC)
 OOS_END = datetime(2021, 7, 1, tzinfo=UTC)
@@ -123,6 +124,7 @@ def _artifacts(*, trades: tuple[TradeRecord, ...] | None = None) -> EvaluationAr
         neighborhood=tuple(_survival() for _ in range(6)),
         leave_one_out=tuple(_survival() for _ in range(4)),
         performance_evaluated_versions=1,
+        parameters=StrategyParameters(),
     )
 
 
@@ -316,6 +318,55 @@ def test_hard_boundaries_and_independent_gates() -> None:
     )["profit_factor"] is GateResult.PASS
 
 
+def test_walk_forward_boundary_membership_is_half_open() -> None:
+    boundary = datetime(2020, 7, 1, tzinfo=UTC)
+    assert in_half_open(boundary, START, boundary) is False
+    assert in_half_open(boundary, boundary, END) is True
+    curve = (
+        EquityPoint(START, Decimal("10000")),
+        EquityPoint(datetime(2020, 3, 1, 16, tzinfo=UTC), Decimal("10100")),
+        EquityPoint(boundary, Decimal("11000")),
+        EquityPoint(END, Decimal("11000")),
+    )
+    first_window = window_equities(curve, START, boundary, Decimal("10000"))
+    second_window = window_equities(curve, boundary, END, Decimal("10000"))
+    assert Decimal("11000") not in first_window
+    assert Decimal("10100") in first_window
+    assert second_window[0] == Decimal("10100")
+    assert Decimal("11000") in second_window[1:]
+    trades = (
+        TradeRecord(
+            symbol="BTCUSDT",
+            direction="LONG",
+            entry_time=datetime(2020, 3, 1, 8, tzinfo=UTC),
+            exit_time=datetime(2020, 3, 1, 16, tzinfo=UTC),
+            net_pnl=Decimal("100"),
+        ),
+        TradeRecord(
+            symbol="ETHUSDT",
+            direction="LONG",
+            entry_time=boundary,
+            exit_time=boundary,
+            net_pnl=Decimal("900"),
+        ),
+    )
+    artifacts = EvaluationArtifacts(
+        trades=trades,
+        starting_equity=Decimal("10000"),
+        start=START,
+        end=END,
+        equity_curve=curve,
+        neighborhood=tuple(_survival() for _ in range(6)),
+        leave_one_out=tuple(_survival() for _ in range(4)),
+        parameters=StrategyParameters(),
+    )
+    metrics = compute_metrics(
+        artifacts, EvaluationPolicy.v2(), kind="development", trial_count=1
+    )
+    assert metrics["concentration_period_max"] == Decimal("0.9")
+    assert metrics["window_count"] == 2
+
+
 def test_walk_forward_windows_are_chronological_and_non_overlapping() -> None:
     windows = walk_forward_windows(START, END, months=6)
     assert windows == (
@@ -326,6 +377,37 @@ def test_walk_forward_windows_are_chronological_and_non_overlapping() -> None:
     assert all(left[0] < left[1] for left in windows)
     short = walk_forward_windows(START, datetime(2020, 3, 1, tzinfo=UTC), months=6)
     assert short == ((START, datetime(2020, 3, 1, tzinfo=UTC)),)
+
+
+def test_neighborhood_wrong_cardinality_fails_closed() -> None:
+    artifacts = replace(
+        _artifacts(),
+        parameters=StrategyParameters(),
+        neighborhood=(_survival(),),
+    )
+    bundle = evaluate_development(artifacts)
+    assert bundle.metrics["neighborhood_required_cases"] == 6
+    assert bundle.metrics["neighborhood_case_count"] == 1
+    assert bundle.metrics["neighborhood_survival_fraction"] == Decimal("0")
+    assert bundle.gates["neighborhood"] is GateResult.FAIL
+
+
+def test_psr_converts_annualized_benchmark_to_weekly() -> None:
+    import math
+
+    weekly_star = annualized_psr_benchmark(0.50, "weekly_utc")
+    assert weekly_star == pytest.approx(0.50 / math.sqrt(52))
+    returns = [0.01, -0.002, 0.015, 0.0, 0.008, -0.004, 0.012, 0.003]
+    converted = probabilistic_sharpe_ratio(returns, weekly_star)
+    raw_weekly_units = probabilistic_sharpe_ratio(returns, 0.50)
+    assert converted != raw_weekly_units
+    assert converted > raw_weekly_units
+    assert (
+        EvaluationPolicy.v2().document["development"]["statistical_confidence"]["psr"][
+            "benchmark_sharpe"
+        ]
+        == 0.50
+    )
 
 
 def test_neighborhood_perturbs_each_numeric_parameter_ten_percent() -> None:
@@ -495,6 +577,7 @@ def test_golden_result_bundle_hash_is_stable() -> None:
             ),
         ),
         performance_evaluated_versions=1,
+        parameters=StrategyParameters(),
     )
     first = evaluate_development(artifacts)
     second = evaluate_development(artifacts)

@@ -7,7 +7,7 @@ from typing import Any, Mapping, Sequence
 
 from trading_desk.config import SUPPORTED_SYMBOLS
 from trading_desk.strategy.models import StrategyParameters
-from trading_desk.validation.walk_forward import month_span, walk_forward_windows
+from trading_desk.validation.walk_forward import in_half_open, month_span, walk_forward_windows
 
 ZERO = Decimal("0")
 ONE = Decimal("1")
@@ -83,6 +83,7 @@ class EvaluationArtifacts:
     family_id: str | None = None
     strategy_version_id: str | None = None
     performance_evaluated_versions: int = 1
+    parameters: StrategyParameters | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "starting_equity", as_decimal(self.starting_equity))
@@ -172,13 +173,16 @@ def window_equities(
     end: datetime,
     starting: Decimal,
 ) -> list[Decimal]:
-    values = [equity_at(curve, start, starting)]
+    open_eq = starting
     for point in curve:
-        if start < point.time <= end:
+        if point.time < start:
+            open_eq = point.equity
+        else:
+            break
+    values = [open_eq]
+    for point in curve:
+        if in_half_open(point.time, start, end):
             values.append(point.equity)
-    end_eq = equity_at(curve, end, starting)
-    if values[-1] != end_eq:
-        values.append(end_eq)
     return values
 
 
@@ -288,6 +292,7 @@ def compute_metrics(
     trial_count: int,
 ) -> dict[str, Any]:
     from trading_desk.validation.statistics import (
+        annualized_psr_benchmark,
         deflated_sharpe_ratio,
         probabilistic_sharpe_ratio,
         trade_entry_moving_block_lower_bound,
@@ -318,7 +323,10 @@ def compute_metrics(
     psr_spec = document["development"]["statistical_confidence"]["psr"]
     if psr_spec["return_frequency"] != "weekly_utc":
         raise ValueError("unknown PSR return frequency")
-    psr = probabilistic_sharpe_ratio(weekly_values, float(psr_spec["benchmark_sharpe"]))
+    psr = probabilistic_sharpe_ratio(
+        weekly_values,
+        annualized_psr_benchmark(float(psr_spec["benchmark_sharpe"]), psr_spec["return_frequency"]),
+    )
 
     metrics: dict[str, Any] = {
         "cagr": growth,
@@ -366,7 +374,7 @@ def compute_metrics(
         w_ret = total_return(eqs[0], eqs[-1])
         if w_ret > 0:
             positives += 1
-        bucket = [row for row in trades if w_start <= row.exit_time < w_end]
+        bucket = [row for row in trades if in_half_open(row.exit_time, w_start, w_end)]
         period_totals[str(index)] = sum((row.net_pnl for row in bucket), ZERO)
     metrics["window_count"] = len(windows)
     metrics["window_max_drawdowns"] = tuple(window_drawdowns)
@@ -398,11 +406,16 @@ def compute_metrics(
     neighborhood = document["development"]["neighborhood"]
     if neighborhood["perturbation"] != "one_parameter_at_a_time_plus_minus_10_percent":
         raise ValueError("unknown neighborhood perturbation")
+    params = artifacts.parameters or StrategyParameters()
+    required = len(perturbed_parameters(params))
     n_cases = artifacts.neighborhood
     n_survive = sum(1 for case in n_cases if case_survives(case, neighborhood["survival"]))
-    metrics["neighborhood_survival_fraction"] = (
-        as_decimal(n_survive) / as_decimal(len(n_cases)) if n_cases else ZERO
-    )
+    metrics["neighborhood_case_count"] = len(n_cases)
+    metrics["neighborhood_required_cases"] = required
+    if len(n_cases) != required:
+        metrics["neighborhood_survival_fraction"] = ZERO
+    else:
+        metrics["neighborhood_survival_fraction"] = as_decimal(n_survive) / as_decimal(required)
 
     loo = document["development"]["leave_one_symbol_out"]
     loo_cases = artifacts.leave_one_out
