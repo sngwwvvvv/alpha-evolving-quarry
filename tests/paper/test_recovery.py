@@ -701,6 +701,56 @@ def test_process_bar_skips_duplicate_or_older_kline(tmp_path: Path) -> None:
     assert applied[-1] == (h.metadata.symbol, nxt)
 
 
+def test_caught_up_symbol_pending_does_not_false_data_gap(tmp_path: Path) -> None:
+    gap = [NOW + MINUTE * offset for offset in (1, 2, 3, 4)]
+    rest_bars = [_bar("BTCUSDT", stamp, "100") for stamp in gap] + [_bar("ETHUSDT", stamp, "100") for stamp in gap]
+    h = Harness(tmp_path, rest=FakeRestClient(rest_bars), extra_symbols=("ETHUSDT",))
+    h.arm()
+    h.engine.process_bar(_bar("BTCUSDT", NOW, "100"))
+    for offset in range(5):
+        stamp = NOW + MINUTE * offset
+        h.clock.set(stamp)
+        h.arm()
+        h.engine.process_bar(_bar("ETHUSDT", stamp, "100"))
+    assert h.engine._last_open["ETHUSDT"] == NOW + MINUTE * 4
+    assert h.engine._last_open["BTCUSDT"] == NOW
+    hole_fill = NOW + MINUTE * 2
+    h.engine.lifecycle.account.pending["ETHUSDT"] = PendingEntry(
+        _signal("ETHUSDT", hole_fill),
+        fill_time=hole_fill,
+    )
+    live = NOW + MINUTE * 5
+    h.clock.set(live)
+    h.arm()
+    result = h.engine.process_bar(_bar("BTCUSDT", live, "100"))
+    assert result is not None
+    assert result.repaired is True
+    assert result.status == "OK"
+    assert h.db.get_paper_state(h.run.family_id)["status"] == "PAPER_RUNNING"
+    assert "ETHUSDT" in h.engine.lifecycle.account.pending
+
+    tape = tuple(
+        MarketEvent(
+            time=NOW + MINUTE * offset,
+            symbol="BTCUSDT",
+            kind="kline",
+            bar=_bar("BTCUSDT", NOW + MINUTE * offset, "100"),
+        )
+        for offset in (1, 2, 3, 4)
+    )
+    account = PaperLifecycle().account
+    account.pending["ETHUSDT"] = PendingEntry(_signal("ETHUSDT", hole_fill), fill_time=hole_fill)
+    unit = reconcile_chronologically(
+        intents=(LocalIntent(time=hole_fill, symbol="ETHUSDT", kind="entry", quantity=Decimal("0.1")),),
+        events=tape,
+        account=account,
+        symbols=("BTCUSDT",),
+        windows={"BTCUSDT": (NOW + MINUTE, live)},
+    )
+    assert unit.status == "OK"
+    assert unit.repaired is True
+
+
 def test_repair_does_not_replay_watermarked_minutes_for_other_symbols(tmp_path: Path) -> None:
     gap = [NOW + MINUTE * offset for offset in (1, 2, 3, 4)]
     rest_bars = [_bar("BTCUSDT", stamp, "100") for stamp in gap] + [_bar("ETHUSDT", stamp, "100") for stamp in gap]

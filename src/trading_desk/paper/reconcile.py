@@ -103,19 +103,30 @@ def reconcile_chronologically(
         by_symbol.setdefault(event.symbol, []).append(event)
 
     tape = {(event.symbol, event.time) for event in klines}
+
+    def _in_symbol_window(symbol: str, stamp: datetime) -> bool:
+        if windows is None:
+            return True
+        if symbol not in windows:
+            return False
+        win_start, win_end = windows[symbol]
+        return win_start <= stamp < win_end
+
     for intent in intents:
+        if not _in_symbol_window(intent.symbol, intent.time):
+            continue
         if (intent.symbol, intent.time) not in tape:
             reasons.append(f"unreconciled intent: {intent.symbol}")
 
     intent_entries = {(intent.symbol, intent.kind) for intent in intents}
     for symbol, pending in account.pending.items():
         fill_time = pending.fill_time
-        in_window = True
-        if windows is not None and symbol in windows:
-            win_start, win_end = windows[symbol]
-            in_window = win_start <= fill_time < win_end
+        if windows is not None:
+            in_window = _in_symbol_window(symbol, fill_time)
         elif start is not None and end is not None:
             in_window = start <= fill_time < end
+        else:
+            in_window = True
         if not in_window:
             continue
         if (symbol, "entry") not in intent_entries:
@@ -374,7 +385,7 @@ class PaperEngine:
         intents = tuple(
             LocalIntent(time=pending.fill_time, symbol=symbol, kind="entry")
             for symbol, pending in self.lifecycle.account.pending.items()
-            if start <= pending.fill_time < end
+            if symbol in windows and windows[symbol][0] <= pending.fill_time < windows[symbol][1]
         )
         cover_symbols = tuple(hole_symbols) or tuple(self.feed.symbols)
         result = reconcile_chronologically(
