@@ -10,7 +10,7 @@ from trading_desk.config import utc_now
 from trading_desk.state.db import Database
 
 BUZZ_WARNING_AFTER = timedelta(hours=24)
-_RETRY_DELAYS = (
+RETRY_DELAYS = (
     timedelta(minutes=5),
     timedelta(minutes=15),
     timedelta(minutes=60),
@@ -31,8 +31,8 @@ class OutboxClaim:
 
 
 def _backoff(attempt_count: int) -> timedelta:
-    index = min(max(attempt_count, 1) - 1, len(_RETRY_DELAYS) - 1)
-    return _RETRY_DELAYS[index]
+    index = min(max(attempt_count, 1) - 1, len(RETRY_DELAYS) - 1)
+    return RETRY_DELAYS[index]
 
 
 def _warning_key(idempotency_key: str) -> str:
@@ -74,17 +74,24 @@ def _ensure_buzz_warning(
         return
 
 
-def claim_outbox_due(db: Database, *, now: datetime | None = None) -> list[OutboxClaim]:
+def claim_outbox_due(
+    db: Database,
+    *,
+    now: datetime | None = None,
+    topic: str | None = None,
+) -> list[OutboxClaim]:
     now = now or utc_now()
     claimed: list[OutboxClaim] = []
     with db.transaction() as txn:
-        rows = txn.execute(
-            """SELECT * FROM outbox
-               WHERE status = 'PUBLISH_PENDING'
-                 AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-               ORDER BY outbox_id""",
-            (now.isoformat(),),
-        ).fetchall()
+        sql = """SELECT * FROM outbox
+                 WHERE status = 'PUBLISH_PENDING'
+                   AND (next_attempt_at IS NULL OR next_attempt_at <= ?)"""
+        params: list[Any] = [now.isoformat()]
+        if topic is not None:
+            sql += " AND topic = ?"
+            params.append(topic)
+        sql += " ORDER BY outbox_id"
+        rows = txn.execute(sql, params).fetchall()
         for row in rows:
             attempt_count = int(row["attempt_count"]) + 1
             next_attempt_at = (now + _backoff(attempt_count)).isoformat()
@@ -106,13 +113,43 @@ def claim_outbox_due(db: Database, *, now: datetime | None = None) -> list[Outbo
                 )
             )
             _ensure_buzz_warning(db, txn, row, now=now)
-        aged = txn.execute(
-            """SELECT * FROM outbox
-               WHERE status = 'PUBLISH_PENDING'
-                 AND topic != ?
-                 AND created_at <= ?""",
-            (_WARNING_TOPIC, (now - BUZZ_WARNING_AFTER).isoformat()),
-        ).fetchall()
+        aged_sql = """SELECT * FROM outbox
+                      WHERE status = 'PUBLISH_PENDING'
+                        AND topic != ?
+                        AND created_at <= ?"""
+        aged_params: list[Any] = [_WARNING_TOPIC, (now - BUZZ_WARNING_AFTER).isoformat()]
+        if topic is not None:
+            aged_sql += " AND topic = ?"
+            aged_params.append(topic)
+        aged = txn.execute(aged_sql, aged_params).fetchall()
         for row in aged:
             _ensure_buzz_warning(db, txn, row, now=now)
     return claimed
+
+
+def mark_outbox_published(
+    db: Database,
+    *,
+    outbox_id: int,
+    published_revision_id: str,
+) -> None:
+    if not isinstance(published_revision_id, str) or not published_revision_id.strip():
+        raise ValueError("published_revision_id is required")
+    with db.transaction() as txn:
+        row = txn.execute(
+            "SELECT status, published_revision_id FROM outbox WHERE outbox_id = ?",
+            (outbox_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("unknown outbox_id")
+        existing = row["published_revision_id"]
+        if existing and existing != published_revision_id:
+            raise ValueError("published_revision_id is immutable")
+        if row["status"] == "PUBLISHED" and existing == published_revision_id:
+            return
+        txn.execute(
+            """UPDATE outbox
+               SET status = 'PUBLISHED', published_revision_id = ?
+               WHERE outbox_id = ?""",
+            (published_revision_id, outbox_id),
+        )
