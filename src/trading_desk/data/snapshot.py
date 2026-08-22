@@ -58,7 +58,8 @@ def build_data_snapshot(snapshot: DataSnapshot) -> DataResult:
         return daily
 
     start = common_evaluation_start(checked.snapshot.klines_1m)
-    evaluation_start = start.evaluation_start if start.status == OK else None
+    if start.status != OK:
+        return start
     bars = hourly.bars + daily.bars
     built = DataSnapshot(
         klines_1m=checked.snapshot.klines_1m,
@@ -70,6 +71,6 @@ def build_data_snapshot(snapshot: DataSnapshot) -> DataResult:
         source_hash=source,
         derived_data_hash=derived_data_hash(bars),
         macro_hash=macro_hash(checked.snapshot.macro_events),
-        evaluation_start=evaluation_start,
+        evaluation_start=start.evaluation_start,
     )
     return DataResult(status=OK, snapshot=built)

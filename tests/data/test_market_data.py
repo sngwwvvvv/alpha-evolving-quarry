@@ -4,6 +4,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from trading_desk.config import SUPPORTED_SYMBOLS, UTC
 from trading_desk.data.aggregate import derive_hourly_bars, derive_utc_daily_bars
 from trading_desk.data.contracts import (
@@ -322,3 +324,33 @@ def test_common_evaluation_start_is_latest_four_symbol_timestamp_plus_ema200() -
     aligned = common_evaluation_start(tuple(mid_day))
     assert aligned.status == OK
     assert aligned.evaluation_start == _utc(2020, 7, 29)
+
+
+def test_common_evaluation_start_blocks_missing_symbol() -> None:
+    klines = (
+        _minutes("BTCUSDT", START, 3)
+        + _minutes("ETHUSDT", START, 3)
+        + _minutes("XRPUSDT", START, 3)
+    )
+    result = common_evaluation_start(tuple(klines))
+    assert result.status == DATA_BLOCKED
+    assert any("missing bar: SOLUSDT" in reason for reason in result.reasons)
+
+
+def test_build_data_snapshot_blocks_when_evaluation_start_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # validate_snapshot already requires all four symbols, so this branch is
+    # defensive; monkeypatch forces the fail-closed path in build_data_snapshot.
+    from trading_desk.data import snapshot as snapshot_mod
+    from trading_desk.data.contracts import blocked
+
+    monkeypatch.setattr(
+        snapshot_mod,
+        "common_evaluation_start",
+        lambda _klines: blocked("missing bar: SOLUSDT"),
+    )
+    result = snapshot_mod.build_data_snapshot(_snapshot(_four_symbol_minutes(START, 60)))
+    assert result.status == DATA_BLOCKED
+    assert result.snapshot is None
+    assert any("missing bar: SOLUSDT" in reason for reason in result.reasons)
