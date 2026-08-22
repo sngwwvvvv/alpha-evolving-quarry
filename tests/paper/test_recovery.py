@@ -11,7 +11,7 @@ import pytest
 from trading_desk.backtest.account import PendingEntry, fill_price
 from trading_desk.backtest.execution import PaperLifecycle
 from trading_desk.config import UTC, sha256_hex
-from trading_desk.data.contracts import MINUTE, ContractMetadata, Kline1m
+from trading_desk.data.contracts import MINUTE, ContractMetadata, Funding, Kline1m
 from trading_desk.paper.feeds import (
     ANALYSIS_ONLY_STREAMS,
     DATA_STALE,
@@ -290,6 +290,23 @@ class Harness:
         symbol = self.metadata.symbol
         self.engine.queue_signal(_signal(symbol, stamp, direction=direction, close=Decimal(str(price))))
         self.engine.process_bar(_bar(symbol, stamp, price))
+
+    def restart(self) -> PaperEngine:
+        metas = {self.metadata.symbol: self.metadata}
+        for symbol in self.symbols:
+            metas.setdefault(symbol, _meta(symbol))
+        engine = PaperEngine(
+            db=self.db,
+            run=self.run,
+            feed=self.feed,
+            fills=self.fills,
+            clock=self.clock,
+            allowlist=ALLOWLIST,
+            metadata=metas,
+            starting_equity=STARTING_EQUITY,
+        )
+        engine.begin_session()
+        return engine
 
 
 def test_required_streams_must_be_fresh_for_legal_entries(tmp_path: Path) -> None:
@@ -910,3 +927,92 @@ def test_extreme_conservative_fill_is_rejected_when_caps_cannot_hold(tmp_path: P
     h.enter()
     assert h.metadata.symbol not in h.engine.lifecycle.account.positions
     assert h.engine.lifecycle.rejected
+
+
+def test_paper_account_snapshot_hydrates_and_blocks_until_reconcile_ok(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.arm()
+    h.enter()
+    symbol = h.metadata.symbol
+    position = h.engine.lifecycle.account.positions[symbol]
+    payload = json.loads(h.db.get_paper_state(h.run.family_id)["payload_json"])
+    assert payload["last_reconcile"] == "OK"
+    assert payload["account"]["high_water"]
+    assert symbol in payload["account"]["positions"]
+
+    restarted = h.restart()
+    restored = restarted.lifecycle.account.positions[symbol]
+    assert restored.quantity == position.quantity
+    assert restored.entry_price == position.entry_price
+    assert restarted.lifecycle.account.high_water == h.engine.lifecycle.account.high_water
+    assert restarted.may_open_risk() is True
+
+    rest = FakeRestClient([_bar("BTCUSDT", NOW + MINUTE, "100")], incomplete=True)
+    gapped = Harness(tmp_path / "gap", rest=rest)
+    gapped.arm()
+    gapped.enter()
+    live = NOW + MINUTE * 5
+    gapped.clock.set(live)
+    gapped.arm()
+    result = gapped.engine.process_bar(_bar("BTCUSDT", live, "100"))
+    assert result is not None and result.status == "PAPER_DATA_GAP"
+    cold = gapped.restart()
+    gapped.arm()
+    assert cold.may_open_risk() is False
+    assert json.loads(gapped.db.get_paper_state(gapped.run.family_id)["payload_json"])["last_reconcile"] == "PAPER_DATA_GAP"
+
+
+def test_process_bar_drives_hour_complete_and_funding_slots_only(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.arm()
+    hours: list[datetime] = []
+    real = h.engine.lifecycle.on_hour_complete
+
+    def wrapped(hour_bar: object, hourly_closes: list[Decimal], daily_closes: list[Decimal]) -> None:
+        hours.append(hour_bar.open_time)  # type: ignore[attr-defined]
+        real(hour_bar, hourly_closes, daily_closes)
+
+    h.engine.lifecycle.on_hour_complete = wrapped  # type: ignore[method-assign]
+    midday = datetime(2026, 8, 23, 12, 59, tzinfo=UTC)
+    h.clock.set(midday)
+    h.arm()
+    h.engine.process_bar(_bar("BTCUSDT", midday, "101"))
+    assert hours == [datetime(2026, 8, 23, 12, 0, tzinfo=UTC)]
+
+    fund = Harness(tmp_path / "fund", now=datetime(2026, 8, 23, 16, 0, tzinfo=UTC))
+    fund.arm()
+    funding_seen: list[object] = []
+    real_minute = fund.engine.lifecycle.on_minute
+
+    def wrap_minute(bar: Kline1m, metadata: ContractMetadata, funding: object) -> None:
+        funding_seen.append(funding)
+        real_minute(bar, metadata, funding)
+
+    fund.engine.lifecycle.on_minute = wrap_minute  # type: ignore[method-assign]
+    fund.feed.ingest_funding(Funding(symbol="BTCUSDT", funding_time=fund.clock.now(), funding_rate=Decimal("0.01")))
+    slot = fund.clock.now()
+    fund.engine.process_bar(_bar("BTCUSDT", slot, "102"))
+    assert funding_seen[-1] is not None
+    assert getattr(funding_seen[-1], "funding_rate") == Decimal("0.01")
+    assert getattr(funding_seen[-1], "funding_time") == slot
+
+    off_slot = slot + MINUTE
+    fund.clock.set(off_slot)
+    fund.arm()
+    fund.engine.process_bar(_bar("BTCUSDT", off_slot, "102"))
+    assert funding_seen[-1] is None
+
+
+def test_kline_receipt_does_not_stale_live_price_freshness(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.arm()
+    live = NOW + timedelta(seconds=50)
+    h.clock.set(live)
+    h.feed.ingest_price(h.metadata.symbol, live, Decimal("100.5"))
+    h.feed.ingest_price(h.metadata.symbol, NOW, Decimal("99"))
+    assert h.feed.last_seen("price", h.metadata.symbol) == live
+    closed = NOW
+    h.clock.set(NOW + MINUTE)
+    h.engine.process_bar(_bar(h.metadata.symbol, closed, "100"))
+    assert h.feed.last_seen("price", h.metadata.symbol) == h.clock.now()
+    assert h.feed.is_fresh("price", symbol=h.metadata.symbol, now=h.clock.now())

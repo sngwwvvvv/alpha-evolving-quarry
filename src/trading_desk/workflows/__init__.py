@@ -6,6 +6,7 @@ from trading_desk.workflows.research_loop import (
     SuccessorMutationError,
     coding_inputs,
     propose_successor_mutation,
+    research_inputs,
     run_development_cycle,
     run_sealed_oos,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "SuccessorMutationError",
     "coding_inputs",
     "propose_successor_mutation",
+    "research_inputs",
     "run_development_cycle",
     "run_sealed_oos",
 ]

@@ -185,14 +185,14 @@ def test_technical_rerun_does_not_consume_budget(tmp_path: Path) -> None:
     db = Database(tmp_path / "state.sqlite3")
     family_id, _, run = _register_run(db)
     walk(db, run, ("DRAFT", "DEVELOPMENT_RUNNING"))
-    assert db.get_budget(family_id).performance_evaluated_versions == 1
+    assert db.get_budget(family_id).performance_evaluated_versions == 0
 
     apply(db, run, "RUN_ERROR", seq=2, reason="engine crash")
     apply(db, run, "DEVELOPMENT_RUNNING", seq=3, reason="technical rerun")
     apply(db, run, "DATA_BLOCKED", seq=4, reason="missing bars")
     apply(db, run, "DEVELOPMENT_RUNNING", seq=5, reason="technical rerun")
 
-    assert db.get_budget(family_id).performance_evaluated_versions == 1
+    assert db.get_budget(family_id).performance_evaluated_versions == 0
     assert db.get_budget(family_id).oos_evaluations == 0
     assert states_of(db, run) == [
         "DRAFT",
@@ -223,6 +223,8 @@ def test_development_mutation_path_uses_a_new_version(tmp_path: Path) -> None:
 
     assert states_of(db, run)[-1] == "MUTATION_PROPOSED"
     assert states_of(db, successor) == ["DRAFT", "DEVELOPMENT_RUNNING"]
+    assert db.get_budget(family_id).performance_evaluated_versions == 1
+    apply(db, successor, "ANALYSIS_READY", seq=2)
     assert db.get_budget(family_id).performance_evaluated_versions == 2
 
 
@@ -517,10 +519,10 @@ def test_transition_and_budget_and_outbox_roll_back_together(tmp_path: Path) -> 
     )
 
     _, _, other = _register_run(db, family_id=family_id)
-    walk(db, other, ("DRAFT",))
+    walk(db, other, ("DRAFT", "DEVELOPMENT_RUNNING"))
     with pytest.raises(TransitionError, match="budget exhausted"):
-        apply(db, other, "DEVELOPMENT_RUNNING", seq=1)
-    assert states_of(db, other) == ["DRAFT"]
+        apply(db, other, "ANALYSIS_READY", seq=2)
+    assert states_of(db, other) == ["DRAFT", "DEVELOPMENT_RUNNING"]
     assert (
         db.get_budget(family_id).performance_evaluated_versions
         == budget.max_performance_evaluated_versions

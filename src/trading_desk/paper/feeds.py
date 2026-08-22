@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any, Protocol
 
 from trading_desk.config import SUPPORTED_SYMBOLS, UTC
-from trading_desk.data.contracts import Kline1m
+from trading_desk.data.contracts import Funding, Kline1m
 
 STALE_AFTER = timedelta(seconds=60)
 DATA_STALE = "DATA_STALE"
@@ -93,6 +93,7 @@ class PaperFeed:
         self._books: dict[str, list[Any]] = {}
         self._trades: dict[str, list[Any]] = {}
         self._prices: dict[str, Decimal] = {}
+        self._funding: dict[str, Funding] = {}
 
     def ingest(self, update: StreamUpdate) -> None:
         if update.stream in ANALYSIS_ONLY_STREAMS:
@@ -115,7 +116,10 @@ class PaperFeed:
             if trade is not None:
                 self.ingest_trade(trade)
             return
-        self._last[(update.stream, update.symbol)] = update.time
+        key = (update.stream, update.symbol)
+        existing = self._last.get(key)
+        if existing is None or update.time >= existing:
+            self._last[key] = update.time
         if update.stream == "price" and update.symbol is not None and "price" in update.payload:
             self._prices[update.symbol] = Decimal(str(update.payload["price"]))
 
@@ -126,7 +130,14 @@ class PaperFeed:
         self.ingest(StreamUpdate(stream="price", time=time, symbol=symbol, payload={"price": price}))
 
     def ingest_kline(self, bar: Kline1m) -> None:
-        self.ingest_price(bar.symbol, bar.open_time, bar.close)
+        self.ingest_price(bar.symbol, self.clock.now(), bar.close)
+
+    def ingest_funding(self, funding: Funding) -> None:
+        self._funding[funding.symbol] = funding
+
+    def funding_rate(self, symbol: str) -> Decimal | None:
+        row = self._funding.get(symbol)
+        return None if row is None else row.funding_rate
 
     def ingest_book(self, book: Any) -> None:
         self._books.setdefault(book.symbol, []).append(book)

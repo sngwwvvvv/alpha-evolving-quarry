@@ -538,7 +538,7 @@ def test_sealed_oos_once_rejection_and_research_prohibition(tmp_path: Path) -> N
         research_inputs({"ledger": {}, "oos_trades": []})
     payload = research_inputs(development=development, ledger={"notes": "ok"})
     assert "oos" not in payload
-    assert payload["development"].kind == "development"
+    assert payload["development"]["kind"] == "development"
 
 
 def test_golden_result_bundle_hash_is_stable() -> None:

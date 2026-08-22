@@ -50,6 +50,11 @@ from trading_desk.workflows.research_loop import (
 )
 
 COMMIT = "c" * 40
+WORKTREE = {
+    "disposable": True,
+    "path": "/tmp/worktrees/strategy-v1",
+    "version_id": "ver-1",
+}
 EVAL_START = datetime(2020, 7, 19, tzinfo=UTC)
 DAILY_START = EVAL_START - timedelta(days=EMA_200_WARMUP_DAYS)
 STARTING_EQUITY = Decimal("10000")
@@ -388,7 +393,7 @@ def test_development_pass_automatically_runs_sealed_oos(tmp_path: Path) -> None:
         policy=POLICY,
         starting_equity=STARTING_EQUITY,
         sealed_oos=sealed,
-        evaluate_dev=_pass_development,
+        _evaluate_dev=_pass_development,
     )
     assert cycle.result is not None
     assert cycle.result.outcome is GateResult.PASS
@@ -419,7 +424,7 @@ def test_oos_technical_failure_retries_in_place_without_second_budget(tmp_path: 
         policy=POLICY,
         starting_equity=STARTING_EQUITY,
         sealed_oos=failed,
-        evaluate_dev=_pass_development,
+        _evaluate_dev=_pass_development,
     )
     assert cycle.state == "OOS_RUNNING"
     assert cycle.oos is not None
@@ -497,7 +502,7 @@ def test_ledger_has_gates_attribution_comparison_and_no_oos_mutation(tmp_path: P
         snapshot,
         code_commit=COMMIT,
         sealed_oos=SealedOos(_oos_artifacts(profitable=False)),
-        evaluate_dev=_pass_development,
+        _evaluate_dev=_pass_development,
         policy=POLICY,
         starting_equity=STARTING_EQUITY,
     )
@@ -531,7 +536,7 @@ def test_oos_artifacts_are_analyzable_but_excluded_from_research_and_coding_inpu
         snapshot,
         code_commit=COMMIT,
         sealed_oos=sealed,
-        evaluate_dev=_pass_development,
+        _evaluate_dev=_pass_development,
         policy=POLICY,
         starting_equity=STARTING_EQUITY,
     )
@@ -542,14 +547,14 @@ def test_oos_artifacts_are_analyzable_but_excluded_from_research_and_coding_inpu
     assert store.path_for(cycle.oos.artifact_digests["result_bundle"]).exists()
     payload = research_inputs(development=cycle.result, ledger=cycle.ledger.to_payload())
     assert "oos" not in payload
-    coding = coding_inputs(development=cycle.result, mutation=cycle.mutation)
+    coding = coding_inputs(development=cycle.result, mutation=cycle.mutation, worktree=WORKTREE)
     assert "oos" not in coding
     with pytest.raises(ValueError, match="OOS"):
         research_inputs(development=cycle.result, oos=cycle.oos.result)
     with pytest.raises(ValueError, match="OOS"):
-        coding_inputs({"oos_trades": []})
+        coding_inputs({"oos_trades": []}, worktree=WORKTREE)
     with pytest.raises(ValueError, match="OOS"):
-        coding_inputs(sealed)
+        coding_inputs(sealed, worktree=WORKTREE)
     analyzed = build_ledger_bundle(
         kind="oos",
         result=cycle.oos.result,
@@ -609,3 +614,20 @@ def test_trade_records_include_slippage_cost(tmp_path: Path) -> None:
     assert as_decimal(cycle.result.metrics["profit_factor_stress"]) <= as_decimal(
         cycle.result.metrics["profit_factor"]
     ) or as_decimal(cycle.result.metrics["profit_factor"]).is_infinite()
+
+
+def test_data_blocked_does_not_consume_performance_budget(tmp_path: Path) -> None:
+    db, store, snapshot = _harness(tmp_path)
+    blocked = replace(snapshot, klines_1m=(), hourly_bars=())
+    cycle = run_development_cycle(
+        db,
+        store,
+        blocked,
+        code_commit=COMMIT,
+        policy=POLICY,
+        starting_equity=STARTING_EQUITY,
+    )
+    assert cycle.state == "DATA_BLOCKED"
+    assert cycle.technical_kind == "DATA_BLOCKED"
+    assert db.get_budget(cycle.family_id).performance_evaluated_versions == 0
+    assert db.get_budget(cycle.family_id).oos_evaluations == 0

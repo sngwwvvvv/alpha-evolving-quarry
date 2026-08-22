@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
 from trading_desk.config import UTC, utc_now
 from trading_desk.state.approvals import ApprovalCommand, validate_approval
@@ -26,7 +27,7 @@ class TransitionError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class _Rule:
-    budget_kind: BudgetKind | None = None
+    budget_kind: BudgetKind | tuple[BudgetKind, ...] | None = None
     approval_action: str | None = None
     requires_next_utc_day: bool = False
     requires_repaired: bool = False
@@ -34,16 +35,18 @@ class _Rule:
 
 
 # Explicit spec §12 edges. Agents request; only this table is legal.
+# Performance budget is consumed when gates evaluate (ANALYSIS_READY / OOS_RUNNING),
+# honoring budget.technical_errors_consume_budget: false.
 RULES: dict[tuple[str | None, str], _Rule] = {
     (None, "DRAFT"): _Rule(),
-    ("DRAFT", "DEVELOPMENT_RUNNING"): _Rule(budget_kind="performance"),
+    ("DRAFT", "DEVELOPMENT_RUNNING"): _Rule(),
     ("DEVELOPMENT_RUNNING", "RUN_ERROR"): _Rule(),
     ("DEVELOPMENT_RUNNING", "DATA_BLOCKED"): _Rule(),
     ("RUN_ERROR", "DEVELOPMENT_RUNNING"): _Rule(),
     ("DATA_BLOCKED", "DEVELOPMENT_RUNNING"): _Rule(),
-    ("DEVELOPMENT_RUNNING", "ANALYSIS_READY"): _Rule(),
+    ("DEVELOPMENT_RUNNING", "ANALYSIS_READY"): _Rule(budget_kind="performance"),
     ("ANALYSIS_READY", "MUTATION_PROPOSED"): _Rule(),
-    ("DEVELOPMENT_RUNNING", "OOS_RUNNING"): _Rule(budget_kind="oos"),
+    ("DEVELOPMENT_RUNNING", "OOS_RUNNING"): _Rule(budget_kind=("performance", "oos")),
     ("OOS_RUNNING", "REJECTED"): _Rule(),
     ("OOS_RUNNING", "READY_FOR_PAPER"): _Rule(),
     ("READY_FOR_PAPER", "PAPER_RUNNING"): _Rule(approval_action="start_paper"),
@@ -121,14 +124,42 @@ def _require_next_utc_day(conn: sqlite3.Connection, family_id: str, now: datetim
         raise TransitionError("daily pause not expired")
 
 
-def _paper_payload(to_state: str, now: datetime) -> dict[str, str] | None:
+def _merge_paper_payload(
+    conn: sqlite3.Connection,
+    family_id: str,
+    extra: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT payload_json FROM paper_state WHERE family_id = ?",
+        (family_id,),
+    ).fetchone()
+    payload: dict[str, Any] = {}
+    if row is not None and row["payload_json"]:
+        loaded = json.loads(row["payload_json"])
+        if isinstance(loaded, dict):
+            payload = loaded
+    payload.update(extra)
+    return payload or None
+
+
+def _paper_payload(
+    conn: sqlite3.Connection,
+    family_id: str,
+    to_state: str,
+    now: datetime,
+) -> dict[str, Any] | None:
+    extra: dict[str, Any]
     if to_state == "PAPER_DAILY_PAUSED":
-        return {"paused_at": now.isoformat()}
-    if to_state == "PAPER_DATA_GAP":
-        return {"repaired": "false"}
-    if to_state in PAPER_STATES:
-        return {"running_since": now.isoformat()} if to_state == "PAPER_RUNNING" else None
-    return None
+        extra = {"paused_at": now.isoformat()}
+    elif to_state == "PAPER_DATA_GAP":
+        extra = {"repaired": "false"}
+    elif to_state == "PAPER_RUNNING":
+        extra = {"running_since": now.isoformat()}
+    elif to_state in PAPER_STATES or to_state == "READY_FOR_PAPER":
+        extra = {}
+    else:
+        return None
+    return _merge_paper_payload(conn, family_id, extra)
 
 
 def _enqueue_alert(
@@ -228,18 +259,26 @@ def transition(
             idempotency_key=idempotency_key,
             reason=reason,
         )
-        if rule.budget_kind is not None:
+        kinds: tuple[BudgetKind, ...]
+        raw = rule.budget_kind
+        if raw is None:
+            kinds = ()
+        elif isinstance(raw, tuple):
+            kinds = raw
+        else:
+            kinds = (raw,)
+        for kind in kinds:
             _consume_budget(
                 db,
                 conn,
                 family_id=run_row["family_id"],
-                kind=rule.budget_kind,
+                kind=kind,
             )
         if to_state in PAPER_STATES or to_state == "READY_FOR_PAPER":
             db.upsert_paper_state(
                 family_id=run_row["family_id"],
                 status=to_state,
-                payload=_paper_payload(to_state, now),
+                payload=_paper_payload(conn, run_row["family_id"], to_state, now),
                 conn=conn,
             )
         if rule.alert:

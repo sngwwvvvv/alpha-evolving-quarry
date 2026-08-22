@@ -18,6 +18,7 @@ from trading_desk.data.contracts import (
     source_hash,
 )
 from trading_desk.data.validate import validate_snapshot
+from trading_desk.agents.capabilities import coding_inputs, research_inputs
 from trading_desk.ledger.bundle import (
     LedgerBundle,
     MutationManifest,
@@ -52,7 +53,7 @@ from trading_desk.validation.metrics import (
     reconstruct_equity_curve,
     total_return,
 )
-from trading_desk.validation.oos import SealedOos, evaluate_oos_once, research_inputs
+from trading_desk.validation.oos import SealedOos, evaluate_oos_once
 
 ONE = Decimal("1")
 EvaluateDev = Callable[..., ResultBundle]
@@ -99,10 +100,6 @@ class _SkipSymbolStrategy:
         if symbol == self._skipped:
             return None
         return self._inner.signal(symbol, hour_bar, hourly_closes, daily_closes)
-
-
-def coding_inputs(*parts: Any, **kwargs: Any) -> dict[str, Any]:
-    return research_inputs(*parts, **kwargs)
 
 
 def _unslipped(slipped: Decimal, rate: Decimal, *, buy: bool) -> Decimal:
@@ -308,7 +305,7 @@ def run_sealed_oos(
     sealed: SealedOos | EvaluationArtifacts,
     prior_result: ResultBundle | None = None,
     prior_version_id: str | None = None,
-    evaluate_oos_fn: EvaluateOos | None = None,
+    _evaluate_oos_fn: EvaluateOos | None = None,
 ) -> CycleResult:
     current = _current_state(db, run.run_id)
     if current == "DEVELOPMENT_RUNNING":
@@ -317,10 +314,10 @@ def run_sealed_oos(
         raise TransitionError("illegal transition")
     policy = EvaluationPolicy.v2()
     try:
-        if evaluate_oos_fn is None:
+        if _evaluate_oos_fn is None:
             bundle = evaluate_oos_once(sealed, policy)
         else:
-            bundle = evaluate_oos_fn(sealed, policy)
+            bundle = _evaluate_oos_fn(sealed, policy)
     except TechnicalEvaluationError as exc:
         return CycleResult(
             family_id=run.family_id,
@@ -400,8 +397,8 @@ def run_development_cycle(
     prior_result: ResultBundle | None = None,
     sealed_oos: SealedOos | EvaluationArtifacts | None = None,
     evaluation_artifacts: EvaluationArtifacts | None = None,
-    evaluate_dev: EvaluateDev | None = None,
-    evaluate_oos_fn: EvaluateOos | None = None,
+    _evaluate_dev: EvaluateDev | None = None,
+    _evaluate_oos_fn: EvaluateOos | None = None,
 ) -> CycleResult:
     policy = policy or ExecutionPolicy()
     parameters = parameters or StrategyParameters()
@@ -512,7 +509,7 @@ def run_development_cycle(
             prior_version_id=prior_version_id,
             family_id=family_id,
             strategy_version_id=version.strategy_version_id,
-            performance_evaluated_versions=budget.performance_evaluated_versions,
+            performance_evaluated_versions=budget.performance_evaluated_versions + 1,
             parameters=parameters,
         )
     else:
@@ -522,17 +519,17 @@ def run_development_cycle(
             prior_version_id=prior_version_id if prior_version_id is not None else evaluation_artifacts.prior_version_id,
             family_id=family_id,
             strategy_version_id=version.strategy_version_id,
-            performance_evaluated_versions=budget.performance_evaluated_versions,
+            performance_evaluated_versions=budget.performance_evaluated_versions + 1,
             parameters=evaluation_artifacts.parameters or parameters,
         )
         if not artifacts.trades and records:
             artifacts = replace(artifacts, trades=records)
 
     try:
-        if evaluate_dev is None:
+        if _evaluate_dev is None:
             bundle = evaluate_development(artifacts, validation_policy)
         else:
-            bundle = evaluate_dev(artifacts, validation_policy)
+            bundle = _evaluate_dev(artifacts, validation_policy)
     except TechnicalEvaluationError as exc:
         dest = "DATA_BLOCKED" if "DATA_BLOCKED" in str(exc) else "RUN_ERROR"
         state = _step(db, identity.run_id, dest, reason=str(exc))
@@ -608,7 +605,7 @@ def run_development_cycle(
         sealed=sealed_oos,
         prior_result=bundle,
         prior_version_id=version.strategy_version_id,
-        evaluate_oos_fn=evaluate_oos_fn,
+        _evaluate_oos_fn=_evaluate_oos_fn,
     )
     return CycleResult(
         family_id=family_id,

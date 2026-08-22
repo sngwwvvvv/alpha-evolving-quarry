@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
 from trading_desk.state.db import Database
@@ -40,47 +39,10 @@ class SealedOos:
         return "SealedOos(sealed=True)"
 
 
-def _is_oos_key(key: str) -> bool:
-    lowered = key.lower()
-    return "oos" in lowered
-
-
 def research_inputs(*parts: Any, **kwargs: Any) -> dict[str, Any]:
-    if kwargs.get("oos") is not None:
-        raise ValueError("OOS artifacts cannot enter research inputs")
-    payload: dict[str, Any] = {}
+    from trading_desk.agents.capabilities import research_inputs as sealed_research_inputs
 
-    def _reject_mapping(data: Mapping[str, Any]) -> None:
-        for key in data:
-            if _is_oos_key(str(key)):
-                raise ValueError("OOS artifacts cannot enter research inputs")
-
-    for part in parts:
-        if isinstance(part, ResultBundle) and part.kind == "oos":
-            raise ValueError("OOS artifacts cannot enter research inputs")
-        if isinstance(part, SealedOos):
-            raise ValueError("OOS artifacts cannot enter research inputs")
-        if isinstance(part, Mapping):
-            _reject_mapping(part)
-            payload.update(dict(part))
-        elif isinstance(part, ResultBundle):
-            payload["development"] = part
-        elif part is not None:
-            raise ValueError("unsupported research input")
-    for key, value in kwargs.items():
-        if key == "oos":
-            continue
-        if _is_oos_key(key):
-            raise ValueError("OOS artifacts cannot enter research inputs")
-        if isinstance(value, ResultBundle) and value.kind == "oos":
-            raise ValueError("OOS artifacts cannot enter research inputs")
-        if isinstance(value, SealedOos):
-            raise ValueError("OOS artifacts cannot enter research inputs")
-        if isinstance(value, Mapping):
-            _reject_mapping(value)
-        if value is not None:
-            payload[key] = value
-    return payload
+    return sealed_research_inputs(*parts, **kwargs)
 
 
 def evaluate_oos_once(
