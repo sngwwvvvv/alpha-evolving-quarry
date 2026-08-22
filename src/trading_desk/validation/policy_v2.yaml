@@ -1,0 +1,123 @@
+version: validation-policy-v2
+
+development:
+  profitability:
+    cagr:
+      target_minimum: 0.12
+      gate_minimum: 0.10
+    calmar:
+      target_minimum: 1.00
+      gate_minimum: 0.75
+
+  risk:
+    max_drawdown:
+      target_maximum: 0.10
+      gate_exclusive_maximum: 0.15
+      scope: [aggregate, each_walk_forward_window]
+
+  walk_forward:
+    window_months: 6
+    overlap: false
+    positive_window_fraction:
+      target_minimum: 0.70
+      gate_minimum: 0.60
+
+  trades:
+    aggregate:
+      target_minimum: 200
+      gate_minimum: 120
+    per_symbol:
+      target_minimum: 30
+      gate_minimum: 20
+
+  profit_factor:
+    base_point_estimate:
+      target_minimum: 1.30
+      gate_minimum: 1.20
+    stress_point_estimate:
+      target_minimum: 1.15
+      gate_minimum: 1.05
+    bootstrap:
+      confidence: 0.90
+      target_lower_bound_minimum: 1.05
+      gate_lower_bound_exclusive_minimum: 1.00
+      block_days: 30
+      resamples: 5000
+      seed: 20260823
+      algorithm: trade-entry-moving-block-v1
+      preserve: [whole_trades, cross_symbol_entry_clusters]
+
+  execution_stress:
+    fee_multiplier: 1.5
+    slippage_multiplier: 2.0
+    adverse_paid_funding_multiplier: 1.5
+    received_funding_multiplier: 0.5
+
+  statistical_confidence:
+    psr:
+      return_frequency: weekly_utc
+      benchmark_sharpe: 0.50
+      target_probability_minimum: 0.95
+      gate_probability_minimum: 0.90
+    dsr:
+      target_probability_minimum: 0.99
+      gate_probability_minimum: 0.95
+      trial_count: every_performance_evaluated_version
+      correlation_treatment: daily-psr-dsr-v1
+
+  concentration:
+    symbol:
+      target_share_maximum: 0.50
+      gate_share_maximum: 0.70
+    direction:
+      target_share_maximum: 0.70
+      gate: report_only
+    period:
+      bucket: walk_forward_window
+      target_share_maximum: 0.50
+      gate_share_maximum: 0.70
+
+  neighborhood:
+    perturbation: one_parameter_at_a_time_plus_minus_10_percent
+    survival:
+      total_return_minimum: 0.00
+      profit_factor_minimum: 1.00
+      max_drawdown_maximum: 0.20
+    target_survival_fraction: 0.70
+    gate_survival_fraction_minimum: 0.50
+
+  leave_one_symbol_out:
+    cases: 4
+    survival:
+      total_return_minimum: 0.00
+      profit_factor_minimum: 1.00
+      max_drawdown_maximum: 0.20
+    target_surviving_count: 4
+    gate_surviving_count_minimum: 3
+
+oos:
+  sealed_window_months: 6
+  evaluations_per_family: 1
+  trades:
+    target_minimum: 40
+    gate_minimum: 20
+  total_return:
+    target_minimum: 0.05
+    gate_exclusive_minimum: 0.00
+  profit_factor:
+    target_minimum: 1.20
+    gate_minimum: 1.05
+  max_drawdown:
+    target_maximum: 0.10
+    gate_exclusive_maximum: 0.15
+  psr: report_only
+  dsr: not_recomputed
+  bootstrap: not_run
+  neighborhood: not_run
+  leave_one_symbol_out: not_run
+
+budget:
+  max_performance_evaluated_versions_per_family: 8
+  mutations_per_successor_version: 1
+  max_oos_evaluations_per_family: 1
+  technical_errors_consume_budget: false
