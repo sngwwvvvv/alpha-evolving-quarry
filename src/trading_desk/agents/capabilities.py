@@ -42,6 +42,12 @@ def _tokens(key: Any) -> set[str]:
     return parts
 
 
+def scan_bundle(profile: str, value: Any) -> None:
+    """Re-apply OOS/paper/database/credential seals to raw job dicts and envelopes."""
+    _scan(profile, value)
+    reject_credentials(value)
+
+
 def reject_credentials(value: Any) -> None:
     secrets = [os.environ.get(name) or "" for name in _SECRET_ENV]
     secrets = [item for item in secrets if len(item) >= 8]

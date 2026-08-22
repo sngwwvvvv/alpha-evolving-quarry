@@ -9,6 +9,7 @@ import pytest
 
 from trading_desk.agents import (
     AGENT_ERROR,
+    AgentJob,
     CapabilityError,
     FakeProfileAdapter,
     PROFILE_CONFIGS,
@@ -309,6 +310,39 @@ def test_research_and_coding_reject_oos_paper_and_database_under_alternate_keys(
     assert payload["development"]["kind"] == "development"
 
 
+def test_make_job_and_submit_reseal_oos_paper_and_database_in_raw_dicts() -> None:
+    with pytest.raises(CapabilityError, match="OOS"):
+        make_job("research", "propose_mutation", {"development": {"kind": "oos"}})
+    with pytest.raises(CapabilityError, match="paper"):
+        make_job(
+            "research",
+            "propose_mutation",
+            {"development": {"kind": "development"}, "notes": {"paper_account": {}}},
+        )
+    with pytest.raises(CapabilityError, match="database"):
+        make_job(
+            "coding",
+            "implement",
+            {
+                "development": {"kind": "development"},
+                "sqlite_path": "state.sqlite3",
+                "worktree": WORKTREE,
+            },
+        )
+    job = AgentJob(
+        job_id="raw-research",
+        profile="research",
+        action="propose_mutation",
+        input_bundle={"development": {"kind": "oos"}},
+        logical_model="gpt-5.6-sol",
+        provider="openai-codex",
+    )
+    adapter = FakeProfileAdapter([_ok_research])
+    with pytest.raises(CapabilityError, match="OOS"):
+        adapter.submit(job)
+    assert adapter.jobs == []
+
+
 def test_coding_requires_disposable_worktree_metadata() -> None:
     with pytest.raises(CapabilityError, match="worktree"):
         coding_inputs(development=_bundle("development"), mutation={"hypothesis": "x"})
@@ -343,6 +377,42 @@ def test_analysis_accepts_oos_result_bundle_only() -> None:
     )
     result = adapter.submit(job)
     assert result.status == AGENT_ERROR
+
+
+def test_development_analysis_allows_single_mutation_and_loss_axes() -> None:
+    job = make_job(
+        "analysis-ledger",
+        "draft_ledger",
+        analysis_ledger_inputs(result=_bundle("development")),
+    )
+
+    def ok(current):
+        payload = _ok_analysis(current)
+        payload["payload"] = {
+            "analysis": {
+                "by_cost_type": {"fees": "0.04"},
+                "by_direction": {"LONG": "-1.00"},
+                "by_exit_reason": ["stop"],
+                "by_period": {"0": "-1.50"},
+                "by_regime": {"trend": "-0.50"},
+                "by_symbol": {"BTCUSDT": "-1.50"},
+                "loss_drivers": ["fees"],
+            },
+            "markdown_draft": "# Ledger\n",
+            "mutation": {
+                "expected_causal_effect": "fewer false breakouts",
+                "files_and_fields": ["strategy/default.py:threshold"],
+                "hypothesis": "raise threshold in high-vol regime",
+                "invariant_diff": "unchanged",
+            },
+            "schema": "analysis-ledger-v1",
+        }
+        return payload
+
+    result = FakeProfileAdapter([ok]).submit(job)
+    assert result.status == "OK"
+    assert result.payload["mutation"]["hypothesis"] == "raise threshold in high-vol regime"
+    assert result.payload["analysis"]["by_symbol"]["BTCUSDT"] == "-1.50"
 
 
 def test_analysis_rejects_independent_pass_fail_and_metric_changes() -> None:

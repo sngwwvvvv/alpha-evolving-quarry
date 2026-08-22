@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from trading_desk.agents.capabilities import CapabilityError, reject_credentials
+from trading_desk.agents.capabilities import CapabilityError, reject_credentials, scan_bundle
 from trading_desk.agents.schemas import (
     AGENT_ERROR,
     AgentJob,
@@ -145,6 +145,7 @@ def make_job(
     if provider is not None and provider != spec.provider:
         raise ValueError("no provider fallback")
     bundle = dict(input_bundle)
+    scan_bundle(profile, bundle)
     worktree = bundle.pop("worktree", None) if profile == "coding" else None
     if profile == "coding":
         if not isinstance(worktree, Mapping) or worktree.get("disposable") is not True:
@@ -164,7 +165,7 @@ def make_job(
     )
     envelope = job.to_envelope()
     validate_job_envelope(envelope)
-    reject_credentials(envelope)
+    scan_bundle(profile, envelope)
     return job
 
 
@@ -191,7 +192,7 @@ def _interpret(job: AgentJob, raw: Any) -> tuple[dict[str, Any] | None, str]:
     if parsed is None:
         return None, "invalid JSON"
     try:
-        validate_agent_response(job.profile, parsed)
+        validate_agent_response(job.profile, parsed, input_bundle=job.input_bundle)
     except (SchemaError, KeyError) as exc:
         return None, str(exc)
     if parsed["job_id"] != job.job_id or parsed["pin"] != job.pin:
@@ -243,7 +244,10 @@ class HermesAdapter:
     def submit(self, job: AgentJob) -> AgentResult:
         envelope = job.to_envelope()
         validate_job_envelope(envelope)
-        reject_credentials(envelope)
+        scan_bundle(job.profile, job.input_bundle)
+        if job.worktree is not None:
+            scan_bundle(job.profile, job.worktree)
+        scan_bundle(job.profile, envelope)
         pin = job.pin
         last_reason = "invalid agent output"
         for attempt in (1, 2):

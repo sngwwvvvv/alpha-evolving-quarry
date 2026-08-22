@@ -147,6 +147,33 @@ RESPONSE_SCHEMA: dict[str, Any] = {
     },
 }
 
+MUTATION_OBJECT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "expected_causal_effect",
+        "files_and_fields",
+        "hypothesis",
+        "invariant_diff",
+    ],
+    "properties": {
+        "expected_causal_effect": {"type": "string", "minLength": 1},
+        "files_and_fields": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1},
+        },
+        "hypothesis": {"type": "string", "minLength": 1},
+        "invariant_diff": {"type": "string", "minLength": 1},
+    },
+}
+
+LOSS_AXIS_SCHEMA: dict[str, Any] = {
+    "type": ["object", "array"],
+    "items": {"type": "string", "minLength": 1},
+    "additionalProperties": {"type": "string"},
+}
+
 PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
     "orchestrator": {
         "type": "object",
@@ -161,28 +188,7 @@ PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "object",
         "additionalProperties": False,
         "required": ["mutation"],
-        "properties": {
-            "mutation": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": [
-                    "expected_causal_effect",
-                    "files_and_fields",
-                    "hypothesis",
-                    "invariant_diff",
-                ],
-                "properties": {
-                    "expected_causal_effect": {"type": "string", "minLength": 1},
-                    "files_and_fields": {
-                        "type": "array",
-                        "minItems": 1,
-                        "items": {"type": "string", "minLength": 1},
-                    },
-                    "hypothesis": {"type": "string", "minLength": 1},
-                    "invariant_diff": {"type": "string", "minLength": 1},
-                },
-            }
-        },
+        "properties": {"mutation": MUTATION_OBJECT_SCHEMA},
     },
     "coding": {
         "type": "object",
@@ -223,11 +229,17 @@ PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
+                    "by_cost_type": LOSS_AXIS_SCHEMA,
+                    "by_direction": LOSS_AXIS_SCHEMA,
+                    "by_exit_reason": LOSS_AXIS_SCHEMA,
+                    "by_period": LOSS_AXIS_SCHEMA,
+                    "by_regime": LOSS_AXIS_SCHEMA,
+                    "by_symbol": LOSS_AXIS_SCHEMA,
                     "loss_drivers": {"type": "array", "items": {"type": "string"}},
                 },
             },
             "markdown_draft": {"type": "string", "minLength": 1},
-            "mutation": {"type": "null"},
+            "mutation": {**MUTATION_OBJECT_SCHEMA, "type": ["object", "null"]},
             "schema": {"const": ANALYSIS_SCHEMA},
         },
     },
@@ -242,13 +254,27 @@ def validate_job_envelope(envelope: Mapping[str, Any]) -> None:
         raise SchemaError("$.worktree is not allowed")
 
 
-def validate_agent_response(profile: str, payload: Mapping[str, Any]) -> None:
+def validate_agent_response(
+    profile: str,
+    payload: Mapping[str, Any],
+    *,
+    input_bundle: Mapping[str, Any] | None = None,
+) -> None:
     validate_json_schema(RESPONSE_SCHEMA, payload)
-    if payload["status"] == OK:
-        try:
-            validate_json_schema(PAYLOAD_SCHEMAS[profile], payload["payload"])
-        except KeyError as exc:
-            raise SchemaError(f"unknown profile {profile}") from exc
+    if payload["status"] != OK:
+        return
+    try:
+        validate_json_schema(PAYLOAD_SCHEMAS[profile], payload["payload"])
+    except KeyError as exc:
+        raise SchemaError(f"unknown profile {profile}") from exc
+    if profile != "analysis-ledger":
+        return
+    result = (input_bundle or {}).get("result")
+    kind = ""
+    if isinstance(result, Mapping):
+        kind = str(result.get("kind") or "")
+    if kind.lower() == "oos" and payload["payload"].get("mutation") is not None:
+        raise SchemaError("OOS analysis cannot propose a mutation")
 
 
 @dataclass(frozen=True, slots=True)

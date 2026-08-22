@@ -25,7 +25,7 @@ There is no automatic model or provider fallback. If the pinned model is unavail
 - Orchestrator translates a core-approved action into a worker job and returns a result handle. It must not decide validation, edit strategy content, read sealed OOS, approve paper, or control positions.
 - Research may receive development artifacts, prior development ledger entries, invariants, and public sources. It emits exactly one falsifiable mutation. OOS, paper, SQLite, and credentials are forbidden even under alternate keys.
 - Coding implements that mutation in a disposable worktree (`disposable: true`, path, `version_id`). No SQLite, sealed OOS, paper credentials, or unapproved dependencies.
-- Analysis/Ledger consumes a core-validated result bundle only (OOS bundles may be analyzed). It emits `analysis-ledger-v1` JSON plus a Markdown draft. It must not write SQLite/wiki, change metrics, declare pass/fail, or propose an OOS-driven mutation.
+- Analysis/Ledger consumes a core-validated result bundle only (OOS bundles may be analyzed). It emits `analysis-ledger-v1` JSON plus a Markdown draft, with optional loss axes (`loss_drivers`, symbol/direction/regime/period/exit/cost). Development-failure analysis may include a single mutation object or null; OOS analysis must keep mutation null. It must not write SQLite/wiki, change metrics, declare pass/fail, or propose an OOS-driven mutation.
 
 ## Preflight
 
