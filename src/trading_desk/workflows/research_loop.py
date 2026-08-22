@@ -310,14 +310,25 @@ def run_sealed_oos(
     prior_version_id: str | None = None,
     evaluate_oos_fn: EvaluateOos | None = None,
 ) -> CycleResult:
-    if _current_state(db, run.run_id) != "DEVELOPMENT_RUNNING":
+    current = _current_state(db, run.run_id)
+    if current == "DEVELOPMENT_RUNNING":
+        _step(db, run.run_id, "OOS_RUNNING")
+    elif current != "OOS_RUNNING":
         raise TransitionError("illegal transition")
     policy = EvaluationPolicy.v2()
-    _step(db, run.run_id, "OOS_RUNNING")
-    if evaluate_oos_fn is None:
-        bundle = evaluate_oos_once(sealed, policy)
-    else:
-        bundle = evaluate_oos_fn(sealed, policy)
+    try:
+        if evaluate_oos_fn is None:
+            bundle = evaluate_oos_once(sealed, policy)
+        else:
+            bundle = evaluate_oos_fn(sealed, policy)
+    except TechnicalEvaluationError as exc:
+        return CycleResult(
+            family_id=run.family_id,
+            version_id=run.strategy_version_id,
+            run=run,
+            state="OOS_RUNNING",
+            technical_kind=str(exc) or "RUN_ERROR",
+        )
     artifacts = sealed.artifacts_for_authorized_run() if isinstance(sealed, SealedOos) else sealed
     dest = "READY_FOR_PAPER" if bundle.outcome is GateResult.PASS else "REJECTED"
     state = _step(db, run.run_id, dest)

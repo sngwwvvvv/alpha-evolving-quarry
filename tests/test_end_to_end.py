@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -405,6 +405,47 @@ def test_development_pass_automatically_runs_sealed_oos(tmp_path: Path) -> None:
     assert states == ["DRAFT", "DEVELOPMENT_RUNNING", "OOS_RUNNING", "READY_FOR_PAPER"]
     with pytest.raises(TransitionError):
         run_sealed_oos(db, store, run=cycle.run, sealed=sealed)
+
+
+def test_oos_technical_failure_retries_in_place_without_second_budget(tmp_path: Path) -> None:
+    db, store, snapshot = _harness(tmp_path)
+    ok = _oos_artifacts(profitable=True)
+    failed = SealedOos(replace(ok, technical_error=True, technical_kind="RUN_ERROR"))
+    cycle = run_development_cycle(
+        db,
+        store,
+        snapshot,
+        code_commit=COMMIT,
+        policy=POLICY,
+        starting_equity=STARTING_EQUITY,
+        sealed_oos=failed,
+        evaluate_dev=_pass_development,
+    )
+    assert cycle.state == "OOS_RUNNING"
+    assert cycle.oos is not None
+    assert cycle.oos.technical_kind == "RUN_ERROR"
+    assert cycle.oos.result is None
+    assert db.get_budget(cycle.family_id).oos_evaluations == 1
+    assert [row["to_state"] for row in db.list_transitions(cycle.run.run_id)] == [
+        "DRAFT",
+        "DEVELOPMENT_RUNNING",
+        "OOS_RUNNING",
+    ]
+
+    retried = run_sealed_oos(db, store, run=cycle.run, sealed=SealedOos(ok))
+    assert retried.state == "READY_FOR_PAPER"
+    assert retried.result is not None
+    assert retried.result.kind == "oos"
+    assert retried.technical_kind is None
+    assert db.get_budget(cycle.family_id).oos_evaluations == 1
+    assert [row["to_state"] for row in db.list_transitions(cycle.run.run_id)] == [
+        "DRAFT",
+        "DEVELOPMENT_RUNNING",
+        "OOS_RUNNING",
+        "READY_FOR_PAPER",
+    ]
+    with pytest.raises(TransitionError):
+        run_sealed_oos(db, store, run=cycle.run, sealed=SealedOos(ok))
 
 
 def test_ledger_has_gates_attribution_comparison_and_no_oos_mutation(tmp_path: Path) -> None:
