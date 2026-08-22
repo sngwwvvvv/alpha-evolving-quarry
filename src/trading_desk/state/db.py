@@ -373,14 +373,16 @@ class Database:
         object_hashes: Mapping[str, Any],
         source_command_hash: str,
         idempotency_key: str,
+        conn: sqlite3.Connection | None = None,
     ) -> str:
         actor_id = _require_text("actor_id", actor_id)
         action = _require_text("action", action)
         source_command_hash = _require_hash("source_command_hash", source_command_hash)
         idempotency_key = _require_text("idempotency_key", idempotency_key)
         approval_id = uuid.uuid4().hex
-        with self.transaction() as conn:
-            conn.execute(
+
+        def _insert(txn: sqlite3.Connection) -> str:
+            txn.execute(
                 """INSERT INTO approvals (
                        approval_id, actor_id, action, object_hashes_json,
                        source_command_hash, idempotency_key, created_at
@@ -395,7 +397,33 @@ class Database:
                     _utc_timestamp(),
                 ),
             )
-        return approval_id
+            return approval_id
+
+        if conn is not None:
+            return _insert(conn)
+        with self.transaction() as txn:
+            return _insert(txn)
+
+    def get_approval(
+        self,
+        idempotency_key: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> sqlite3.Row | None:
+        idempotency_key = _require_text("idempotency_key", idempotency_key)
+
+        def _fetch(txn: sqlite3.Connection) -> sqlite3.Row | None:
+            return txn.execute(
+                "SELECT * FROM approvals WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+
+        if conn is not None:
+            return _fetch(conn)
+        opened = self.connect()
+        try:
+            return _fetch(opened)
+        finally:
+            opened.close()
 
     def upsert_paper_state(
         self,
@@ -403,12 +431,14 @@ class Database:
         family_id: str,
         status: str,
         payload: Mapping[str, Any] | None = None,
+        conn: sqlite3.Connection | None = None,
     ) -> None:
         family_id = _require_text("family_id", family_id)
         status = _require_text("status", status)
         payload_json = None if payload is None else canonical_json(payload)
-        with self.transaction() as conn:
-            conn.execute(
+
+        def _upsert(txn: sqlite3.Connection) -> None:
+            txn.execute(
                 """INSERT INTO paper_state (family_id, status, payload_json, updated_at)
                    VALUES (?, ?, ?, ?)
                    ON CONFLICT(family_id) DO UPDATE SET
@@ -417,6 +447,12 @@ class Database:
                      updated_at = excluded.updated_at""",
                 (family_id, status, payload_json, _utc_timestamp()),
             )
+
+        if conn is not None:
+            _upsert(conn)
+            return
+        with self.transaction() as txn:
+            _upsert(txn)
 
     def get_paper_state(self, family_id: str) -> dict[str, Any]:
         family_id = _require_text("family_id", family_id)
@@ -444,11 +480,14 @@ class Database:
         payload: Mapping[str, Any],
         idempotency_key: str,
         next_attempt_at: str | None = None,
+        created_at: str | None = None,
+        conn: sqlite3.Connection | None = None,
     ) -> int:
         topic = _require_text("topic", topic)
         idempotency_key = _require_text("idempotency_key", idempotency_key)
-        with self.transaction() as conn:
-            cursor = conn.execute(
+
+        def _insert(txn: sqlite3.Connection) -> int:
+            cursor = txn.execute(
                 """INSERT INTO outbox (
                        topic, payload_json, idempotency_key, status,
                        attempt_count, next_attempt_at, published_revision_id, created_at
@@ -458,7 +497,12 @@ class Database:
                     canonical_json(payload),
                     idempotency_key,
                     next_attempt_at,
-                    _utc_timestamp(),
+                    created_at or _utc_timestamp(),
                 ),
             )
             return int(cursor.lastrowid or 0)
+
+        if conn is not None:
+            return _insert(conn)
+        with self.transaction() as txn:
+            return _insert(txn)
