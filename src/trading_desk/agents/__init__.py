@@ -19,7 +19,7 @@ from trading_desk.agents.hermes import (
     QualificationTaskResult,
     coding_qualification_gate,
     make_job,
-    research_oauth_preflight,
+    research_preflight,
 )
 from trading_desk.agents.schemas import AgentJob, AgentResult
 
@@ -42,5 +42,5 @@ __all__ = [
     "make_job",
     "orchestrator_inputs",
     "research_inputs",
-    "research_oauth_preflight",
+    "research_preflight",
 ]

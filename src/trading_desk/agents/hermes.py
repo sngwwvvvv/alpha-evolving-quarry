@@ -69,29 +69,29 @@ class QualificationTaskResult:
 PROFILE_CONFIGS: dict[str, ProfileConfig] = {
     "orchestrator": ProfileConfig(
         name="orchestrator",
-        logical_model="deepseek-v4-pro",
-        provider="deepseek",
-        credential_env="DEEPSEEK_API_KEY",
+        logical_model="deepseek/deepseek-v4-pro-0813",
+        provider="openrouter",
+        credential_env="OPENROUTER_API_KEY",
         thinking=True,
         reasoning_effort="low",
     ),
     "research": ProfileConfig(
         name="research",
-        logical_model="gpt-5.6-sol",
-        provider="openai-codex",
-        auth="oauth",
+        logical_model="deepseek/deepseek-v4-pro-0813",
+        provider="openrouter",
+        credential_env="OPENROUTER_API_KEY",
     ),
     "coding": ProfileConfig(
         name="coding",
-        logical_model="deepseek-v4-flash",
-        provider="deepseek",
-        credential_env="DEEPSEEK_API_KEY",
+        logical_model="deepseek/deepseek-v4-flash-0731",
+        provider="openrouter",
+        credential_env="OPENROUTER_API_KEY",
     ),
     "analysis-ledger": ProfileConfig(
         name="analysis-ledger",
-        logical_model="kimi-k2.6",
-        provider="kimi-coding",
-        credential_env="KIMI_API_KEY",
+        logical_model="deepseek/deepseek-v4-flash-0731",
+        provider="openrouter",
+        credential_env="OPENROUTER_API_KEY",
         thinking=True,
     ),
 }
@@ -301,12 +301,12 @@ class FakeProfileAdapter(HermesAdapter):
         return item
 
 
-def research_oauth_preflight(resolve: Callable[[str, str], str | None]) -> str:
+def research_preflight(resolve: Callable[[str, str], str | None]) -> str:
     spec = PROFILE_CONFIGS["research"]
     resolved = resolve(spec.logical_model, spec.provider)
     if not resolved or not model_matches(spec.logical_model, resolved):
         raise ProfileUnavailable(
-            "research profile unavailable: gpt-5.6-sol did not resolve through openai-codex OAuth"
+            "research profile unavailable: deepseek/deepseek-v4-pro-0813 did not resolve through openrouter"
         )
     return resolved
 

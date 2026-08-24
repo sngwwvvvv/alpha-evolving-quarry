@@ -462,8 +462,8 @@ Primary roles must not use plain `delegate_task`. Hermes delegation starts child
 
 ### 13.2 Orchestrator
 
-- Model: logical pinned name `deepseek-v4-pro`.
-- Provider: `deepseek`, authenticated by `DEEPSEEK_API_KEY`.
+- Model: logical pinned name `deepseek/deepseek-v4-pro-0813`.
+- Provider: `openrouter`, authenticated by `OPENROUTER_API_KEY`.
 - Thinking enabled; reasoning effort `low`.
 - No model fallback.
 - Responsibilities: translate a core-approved action into a worker job, verify completion shape, and return the result handle.
@@ -471,19 +471,19 @@ Primary roles must not use plain `delegate_task`. Hermes delegation starts child
 
 ### 13.3 Research Agent
 
-- Model: logical pinned name `gpt-5.6-sol`.
-- Provider: `openai-codex` through ChatGPT/Codex OAuth.
+- Model: logical pinned name `deepseek/deepseek-v4-pro-0813`.
+- Provider: `openrouter`, authenticated by `OPENROUTER_API_KEY`.
 - No model fallback.
 - Inputs: development artifacts, prior development ledger entries, immutable invariants, and public research sources.
 - Output: exactly one falsifiable mutation hypothesis in the research schema.
 - Forbidden: OOS access, code changes, direct database writes, approval requests disguised as results, or more than one mutation.
 
-Deployment preflight must confirm that the exact model ID resolves through the configured OAuth provider. If it does not, the profile is unavailable; the system must not silently substitute another GPT model.
+Deployment preflight must confirm that the exact model ID resolves through the configured provider. If it does not, the profile is unavailable; the system must not silently substitute another model.
 
 ### 13.4 Coding Agent
 
-- Model: logical pinned name `deepseek-v4-flash`.
-- Provider: `deepseek`, authenticated by API key.
+- Model: logical pinned name `deepseek/deepseek-v4-flash-0731`.
+- Provider: `openrouter`, authenticated by API key.
 - No model fallback.
 - Workspace: a dedicated Git worktree for the assigned version.
 - Skills:
@@ -500,8 +500,8 @@ Before adoption, the coding profile must pass 10 representative repository tasks
 
 ### 13.5 Analysis/Ledger Agent
 
-- Model: logical pinned name `kimi-k2.6`.
-- Provider: `kimi-coding`, authenticated by `KIMI_API_KEY`.
+- Model: logical pinned name `deepseek/deepseek-v4-flash-0731`.
+- Provider: `openrouter`, authenticated by `OPENROUTER_API_KEY`.
 - Thinking enabled.
 - No model fallback.
 - Input: a core-validated result bundle only.

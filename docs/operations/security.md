@@ -8,10 +8,10 @@ Hold credentials in the profile `.env` or core service identity. Never copy them
 
 | Identity | Secret | Allowed use |
 | --- | --- | --- |
-| Hermes `orchestrator` | `DEEPSEEK_API_KEY` | One-shot dispatch of a core-approved job |
-| Hermes `research` | ChatGPT/Codex OAuth | Read-only materialized development inputs |
-| Hermes `coding` | `DEEPSEEK_API_KEY` | Disposable worktree only |
-| Hermes `analysis-ledger` | `KIMI_API_KEY` | Core-validated result bundle only |
+| Hermes `orchestrator` | `OPENROUTER_API_KEY` | One-shot dispatch of a core-approved job |
+| Hermes `research` | `OPENROUTER_API_KEY` | Read-only materialized development inputs |
+| Hermes `coding` | `OPENROUTER_API_KEY` | Disposable worktree only |
+| Hermes `analysis-ledger` | `OPENROUTER_API_KEY` | Core-validated result bundle only |
 | Trading core | SQLite path / artifact root | Deterministic persistence |
 
 Do not share a Hermes home, `.env`, memory, or gateway token across profiles. Profile `SOUL.md` and prompts are guidance, not security controls. OS account permissions or containers enforce data boundaries.
@@ -34,10 +34,10 @@ Network egress is allowlisted by role where the runtime supports it:
 | --- | --- |
 | Trading core | None required for backtest/paper MVP. Later: allowlisted Binance REST for paper gap repair only |
 | Wiki publisher | Private wiki ingest host only. No SQLite path, no exchange, no LLM |
-| Orchestrator | Pinned DeepSeek endpoint |
-| Research | Pinned `openai-codex` OAuth provider |
-| Coding | Pinned DeepSeek endpoint; no database/wiki/paper hosts |
-| Analysis | Pinned Kimi endpoint; result-bundle input only |
+| Orchestrator | Pinned OpenRouter endpoint |
+| Research | Pinned OpenRouter endpoint |
+| Coding | Pinned OpenRouter endpoint; no database/wiki/paper hosts |
+| Analysis | Pinned OpenRouter endpoint; result-bundle input only |
 | Buzz | Approval-intake / notification host only; not the ledger |
 
 Publisher tests use `FakeWikiSink`. Do not add `requests` / `httpx` / raw sockets to `trading_desk.publish` in this MVP.

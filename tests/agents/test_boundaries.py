@@ -22,7 +22,7 @@ from trading_desk.agents import (
     make_job,
     orchestrator_inputs,
     research_inputs,
-    research_oauth_preflight,
+    research_preflight,
 )
 from trading_desk.config import UTC, canonical_json, sha256_hex
 from trading_desk.state.db import Database
@@ -77,7 +77,7 @@ def _ok_research(job):
             }
         },
         "pin": job.pin,
-        "resolved_model_id": "gpt-5.6-sol",
+        "resolved_model_id": "deepseek/deepseek-v4-pro-0813",
         "status": "OK",
     }
 
@@ -94,7 +94,7 @@ def _ok_coding(job):
             "test_results": {"failed": 0, "passed": True},
         },
         "pin": job.pin,
-        "resolved_model_id": "deepseek-v4-flash",
+        "resolved_model_id": "deepseek/deepseek-v4-flash-0731",
         "status": "OK",
     }
 
@@ -110,7 +110,7 @@ def _ok_analysis(job):
             "schema": "analysis-ledger-v1",
         },
         "pin": job.pin,
-        "resolved_model_id": "kimi-k2.6",
+        "resolved_model_id": "deepseek/deepseek-v4-flash-0731",
         "status": "OK",
     }
 
@@ -121,7 +121,7 @@ def _ok_orchestrator(job):
         "job_id": job.job_id,
         "payload": {"result_handle": "research-job-1", "worker_profile": "research"},
         "pin": job.pin,
-        "resolved_model_id": "deepseek-v4-pro",
+        "resolved_model_id": "deepseek/deepseek-v4-pro-0813",
         "status": "OK",
     }
 
@@ -142,7 +142,7 @@ def test_invalid_json_retries_same_pinned_job_then_agent_error_without_commit() 
     assert result.status == AGENT_ERROR
     assert result.attempts == 2
     assert [item.pin for item in adapter.jobs] == [job.pin, job.pin]
-    assert adapter.jobs[0].logical_model == adapter.jobs[1].logical_model == "gpt-5.6-sol"
+    assert adapter.jobs[0].logical_model == adapter.jobs[1].logical_model == "deepseek/deepseek-v4-pro-0813"
     assert commits == []
     assert result.payload == {}
 
@@ -184,10 +184,10 @@ def test_provider_failure_is_agent_error_without_retry_or_fallback() -> None:
 
 def test_profiles_pin_exact_logical_models_and_providers() -> None:
     expected = {
-        "orchestrator": ("deepseek-v4-pro", "deepseek"),
-        "research": ("gpt-5.6-sol", "openai-codex"),
-        "coding": ("deepseek-v4-flash", "deepseek"),
-        "analysis-ledger": ("kimi-k2.6", "kimi-coding"),
+        "orchestrator": ("deepseek/deepseek-v4-pro-0813", "openrouter"),
+        "research": ("deepseek/deepseek-v4-pro-0813", "openrouter"),
+        "coding": ("deepseek/deepseek-v4-flash-0731", "openrouter"),
+        "analysis-ledger": ("deepseek/deepseek-v4-flash-0731", "openrouter"),
     }
     jobs = {
         "orchestrator": make_job(
@@ -236,18 +236,18 @@ def test_job_rejects_model_override_and_response_fallback() -> None:
 
 def test_success_records_resolved_model_fingerprint() -> None:
     adapter = FakeProfileAdapter(
-        [lambda job: {**_ok_research(job), "resolved_model_id": "gpt-5.6-sol-2026-03"}]
+        [lambda job: {**_ok_research(job), "resolved_model_id": "deepseek/deepseek-v4-pro-0813"}]
     )
     result = adapter.submit(_research_job())
     assert result.status == "OK"
-    assert result.resolved_model_id == "gpt-5.6-sol-2026-03"
+    assert result.resolved_model_id == "deepseek/deepseek-v4-pro-0813"
     assert result.resolved_fingerprint == sha256_hex(
         canonical_json(
             {
-                "logical_model": "gpt-5.6-sol",
-                "provider": "openai-codex",
+                "logical_model": "deepseek/deepseek-v4-pro-0813",
+                "provider": "openrouter",
                 "reasoning_effort": None,
-                "resolved_model_id": "gpt-5.6-sol-2026-03",
+                "resolved_model_id": "deepseek/deepseek-v4-pro-0813",
                 "thinking": False,
             }
         )
@@ -258,25 +258,22 @@ def test_success_records_resolved_model_fingerprint() -> None:
 def test_credentials_never_enter_envelopes_or_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-secret-deepseek-value")
-    monkeypatch.setenv("KIMI_API_KEY", "sk-secret-kimi-value")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-secret-openrouter-value")
     job = make_job(
         "orchestrator",
         "dispatch",
         orchestrator_inputs(action="dispatch", worker_profile="coding"),
     )
     blob = canonical_json(job.to_envelope())
-    assert "sk-secret-deepseek-value" not in blob
-    assert "sk-secret-kimi-value" not in blob
-    assert "DEEPSEEK_API_KEY" not in blob
+    assert "sk-secret-openrouter-value" not in blob
+    assert "OPENROUTER_API_KEY" not in blob
     with pytest.raises(CapabilityError, match="credential"):
-        research_inputs(development=_bundle("development"), api_key="sk-secret-deepseek-value")
+        research_inputs(development=_bundle("development"), api_key="sk-secret-openrouter-value")
     adapter = FakeProfileAdapter([_ok_orchestrator])
     result = adapter.submit(job)
     stored = ArtifactStore(tmp_path).put_json(result.to_payload())
     text = (tmp_path / stored[:2] / stored).read_text(encoding="utf-8")
-    assert "sk-secret-deepseek-value" not in text
-    assert "KIMI_API_KEY" not in text
+    assert "sk-secret-openrouter-value" not in text
 
 
 def test_research_and_coding_reject_oos_paper_and_database_under_alternate_keys(
@@ -334,8 +331,8 @@ def test_make_job_and_submit_reseal_oos_paper_and_database_in_raw_dicts() -> Non
         profile="research",
         action="propose_mutation",
         input_bundle={"development": {"kind": "oos"}},
-        logical_model="gpt-5.6-sol",
-        provider="openai-codex",
+        logical_model="deepseek/deepseek-v4-pro-0813",
+        provider="openrouter",
     )
     adapter = FakeProfileAdapter([_ok_research])
     with pytest.raises(CapabilityError, match="OOS"):
@@ -446,12 +443,13 @@ def test_orchestrator_forbids_validation_oos_approval_and_position_actions() -> 
         orchestrator_inputs(action="dispatch", worker_profile="research", holdout=_bundle("oos"))
 
 
-def test_research_oauth_preflight_requires_exact_model_resolution() -> None:
-    assert research_oauth_preflight(lambda model, provider: "gpt-5.6-sol-2026-03") == "gpt-5.6-sol-2026-03"
+def test_research_preflight_requires_exact_model_resolution() -> None:
+    resolved = "deepseek/deepseek-v4-pro-0813"
+    assert research_preflight(lambda model, provider: resolved) == resolved
     with pytest.raises(ProfileUnavailable, match="research"):
-        research_oauth_preflight(lambda model, provider: None)
+        research_preflight(lambda model, provider: None)
     with pytest.raises(ProfileUnavailable, match="research"):
-        research_oauth_preflight(lambda model, provider: "gpt-4o")
+        research_preflight(lambda model, provider: "deepseek/deepseek-v4-flash-0731")
 
 
 def test_coding_qualification_gate_requires_ten_tasks_at_90_percent() -> None:

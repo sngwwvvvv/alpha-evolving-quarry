@@ -4,12 +4,14 @@ The trading core is deterministic. Hermes profiles are advisory workers only. Th
 
 Use four isolated profiles. Do not share a Hermes home, `.env`, memory, or gateway token across them. Do not use plain `delegate_task` for these roles: Hermes children inherit parent tools and a single child model.
 
+All profiles resolve through the `openrouter` provider. Pin exact model IDs; do not enable OpenRouter routing/fallback variants.
+
 | Profile | Logical model | Provider | Auth | Notes |
 | --- | --- | --- | --- | --- |
-| `orchestrator` | `deepseek-v4-pro` | `deepseek` | `DEEPSEEK_API_KEY` | Thinking on, reasoning effort `low` |
-| `research` | `gpt-5.6-sol` | `openai-codex` | ChatGPT/Codex OAuth | Exact model must resolve at preflight |
-| `coding` | `deepseek-v4-flash` | `deepseek` | `DEEPSEEK_API_KEY` | Disposable git worktree only |
-| `analysis-ledger` | `kimi-k2.6` | `kimi-coding` | `KIMI_API_KEY` | Thinking on; result-bundle input only |
+| `orchestrator` | `deepseek/deepseek-v4-pro-0813` | `openrouter` | `OPENROUTER_API_KEY` | Thinking on, reasoning effort `low` |
+| `research` | `deepseek/deepseek-v4-pro-0813` | `openrouter` | `OPENROUTER_API_KEY` | Exact model must resolve at preflight |
+| `coding` | `deepseek/deepseek-v4-flash-0731` | `openrouter` | `OPENROUTER_API_KEY` | Disposable git worktree only |
+| `analysis-ledger` | `deepseek/deepseek-v4-flash-0731` | `openrouter` | `OPENROUTER_API_KEY` | Thinking on; result-bundle input only |
 
 There is no automatic model or provider fallback. If the pinned model is unavailable, new agent jobs pause with `AGENT_ERROR`. Paper risk, data recovery, the state machine, and critical alerts continue.
 
@@ -29,7 +31,7 @@ There is no automatic model or provider fallback. If the pinned model is unavail
 
 ## Preflight
 
-1. Research: resolve `gpt-5.6-sol` through the configured `openai-codex` OAuth provider. If the exact model ID does not resolve, mark the profile unavailable. Do not substitute another GPT model.
+1. Research: resolve `deepseek/deepseek-v4-pro-0813` through the configured `openrouter` provider. If the exact model ID does not resolve, mark the profile unavailable. Do not substitute another model.
 2. Coding: run 10 representative repository tasks. Adoption requires at least 90% acceptance on: requested change only, invariants unchanged, tests passing, response schema valid, and no unapproved dependency.
 
 ## Runtime contract

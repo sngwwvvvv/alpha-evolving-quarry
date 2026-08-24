@@ -26,7 +26,7 @@ WORKER_PROFILES = frozenset({"analysis-ledger", "coding", "research"})
 FORBIDDEN_ORCHESTRATOR_ACTIONS = frozenset(
     {"approve_paper", "control_positions", "decide_validation", "modify_strategy", "read_oos"}
 )
-_SECRET_ENV = ("DEEPSEEK_API_KEY", "KIMI_API_KEY")
+_SECRET_ENV = ("OPENROUTER_API_KEY",)
 _DB_PATH_RE = re.compile(r"\.(sqlite3?|db)(?:\b|$)", re.IGNORECASE)
 
 
